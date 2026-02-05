@@ -9,9 +9,10 @@ import { useState, useRef, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Mic, Square, Play, Pause, Calendar, Upload, FileAudio } from "lucide-react";
+import { Mic, Square, Play, Pause, FileAudio } from "lucide-react";
 import { Navbar } from "@/components/ui/navbar";
 import { useMemos } from "@/app/context/MemoContext";
+import { createClient } from "@/lib/supabase/browser";
 
 export default function HomePage() {
   const { memos, addMemo } = useMemos();
@@ -20,25 +21,67 @@ export default function HomePage() {
   const [recordingTime, setRecordingTime] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
+  const supabase = createClient();
+  const [username, setUsername] = useState<string | null>(null);
+  const [folders, setFolders] = useState<Array<{ id: string; name: string }>>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<BlobPart[]>([]);
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const recordingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   
   const [playbackSpeeds, setPlaybackSpeeds] = useState<Record<string, number>>({});
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [currentTimes, setCurrentTimes] = useState<Record<string, number>>({});
 
   useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      try {
+        const { data: userRes } = await supabase.auth.getUser();
+        const user = userRes.user;
+        if (!user) return;
+
+        const [{ data: profile }, { data: folderRows }] = await Promise.all([
+          supabase
+            .from("profiles")
+            .select("username")
+            .eq("user_id", user.id)
+            .maybeSingle(),
+          supabase
+            .from("folders")
+            .select("id,name")
+            .eq("user_id", user.id)
+            .order("created_at", { ascending: true }),
+        ]);
+
+        if (!mounted) return;
+
+        setUsername(profile?.username ?? null);
+        const nextFolders = (folderRows ?? []) as Array<{ id: string; name: string }>;
+        setFolders(nextFolders);
+
+        // Default selection: first folder (if any)
+        if (!selectedFolderId && nextFolders.length > 0) {
+          setSelectedFolderId(nextFolders[0].id);
+        }
+      } catch {
+        // ignore; page can still render
+      }
+    })();
+
     return () => {
+      mounted = false;
       if (mediaRecorderRef.current?.state === "recording") {
         mediaRecorderRef.current.stop();
       }
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
       if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const startRecording = async () => {
@@ -65,7 +108,8 @@ export default function HomePage() {
           status: "ready",
           date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
           audioUrl,
-          category: "Personal"
+          category:
+            folders.find((f) => f.id === selectedFolderId)?.name ?? "Personal",
         });
         
         setRecording(false);
@@ -92,29 +136,6 @@ export default function HomePage() {
     }
     if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
     if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current);
-  };
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!file.type.startsWith('audio/')) {
-      setError("Please upload a valid audio file.");
-      return;
-    }
-
-    const audioUrl = URL.createObjectURL(file);
-    addMemo({
-      id: Date.now().toString(),
-      title: file.name.replace(/\.[^/.]+$/, ""), // Use filename without extension
-      status: "ready",
-      date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      audioUrl,
-      category: "Upload"
-    });
-
-    // Reset input
-    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const togglePlay = (id: string) => {
@@ -149,6 +170,11 @@ export default function HomePage() {
     <div className="min-h-screen bg-background">
       <Navbar />
       <main className="container mx-auto px-4 py-8">
+        {username && (
+          <p className="mb-4 text-sm text-muted-foreground">
+            Signed in as <span className="font-medium">{username}</span>
+          </p>
+        )}
         <div className="grid gap-6 md:grid-cols-2">
           <div className="space-y-6">
             {/* Recording Card */}
@@ -156,31 +182,28 @@ export default function HomePage() {
               <CardHeader><CardTitle>Record a Memo</CardTitle></CardHeader>
               <CardContent className="space-y-3">
                 <p className="text-sm text-muted-foreground">Up to 2 minutes.</p>
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">Save to folder</p>
+                  <select
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    value={selectedFolderId ?? ""}
+                    onChange={(e) => setSelectedFolderId(e.target.value)}
+                    disabled={folders.length === 0}
+                  >
+                    {folders.length === 0 ? (
+                      <option value="">No folders found (finish onboarding)</option>
+                    ) : (
+                      folders.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.name}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </div>
                 <Button className="w-full" onClick={recording ? stopRecording : startRecording} variant={recording ? "destructive" : "default"}>
                   {recording ? <><Square className="mr-2 h-4 w-4" /> Stop ({formatTime(recordingTime)})</> : <><Mic className="mr-2 h-4 w-4" /> Start Recording</>}
                 </Button>
-              </CardContent>
-            </Card>
-
-            {/* Upload Card */}
-            <Card className="border-2 border-dashed">
-              <CardHeader><CardTitle className="text-sm">Or Upload Audio</CardTitle></CardHeader>
-              <CardContent>
-                <input 
-                  type="file" 
-                  ref={fileInputRef} 
-                  onChange={handleFileUpload} 
-                  accept="audio/*" 
-                  className="hidden" 
-                />
-                <Button 
-                  variant="outline" 
-                  className="w-full" 
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <Upload className="mr-2 h-4 w-4" /> Upload File
-                </Button>
-                {error && <p className="text-[10px] text-destructive mt-2">{error}</p>}
               </CardContent>
             </Card>
           </div>

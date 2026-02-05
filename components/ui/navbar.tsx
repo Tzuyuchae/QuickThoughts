@@ -1,6 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/browser";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -23,6 +25,41 @@ import Link from "next/link";
 
 export function Navbar() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const router = useRouter();
+  const supabase = createClient();
+  const [email, setEmail] = useState<string | null>(null);
+  const [username, setUsername] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      const { data } = await supabase.auth.getUser();
+      const user = data?.user;
+      if (!user || !mounted) return;
+
+      setEmail(user.email ?? null);
+
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("username")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (!mounted) return;
+      setUsername(profile?.username ?? null);
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [supabase]);
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    router.push("/login");
+    router.refresh();
+  }
 
   const navItems = [
     { href: "/", label: "Home", icon: Home },
@@ -64,17 +101,19 @@ export function Navbar() {
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="rounded-full">
-                  <div className="h-8 w-8 rounded-full bg-gradient-to-br from-red-500 to-blue-500 flex items-center justify-center text-white font-semibold">
-                    U
-                  </div>
+                <div className="h-8 w-8 rounded-full bg-gradient-to-br from-red-500 to-blue-500 flex items-center justify-center text-white font-semibold">
+                  {(username ?? email ?? "U").charAt(0).toUpperCase()}
+                </div>
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuLabel>
                   <div className="flex flex-col gap-1">
-                    <p className="text-sm font-medium">Random Dude</p>
+                    <p className="text-sm font-medium">
+                      {username ?? "Account"}
+                    </p>
                     <p className="text-xs text-muted-foreground">
-                      randomdude@example.com
+                      {email ?? ""}
                     </p>
                   </div>
                 </DropdownMenuLabel>
@@ -88,7 +127,10 @@ export function Navbar() {
                   Settings
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem className="text-destructive">
+                <DropdownMenuItem
+                  className="text-destructive"
+                  onClick={handleLogout}
+                >
                   <LogOut className="mr-2 h-4 w-4" />
                   Log out
                 </DropdownMenuItem>

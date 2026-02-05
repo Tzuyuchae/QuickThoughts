@@ -7,6 +7,8 @@
 
 
 import { useState, useRef, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/browser";
 import { Navbar } from "@/components/ui/navbar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -17,7 +19,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Play, Pause, Calendar, Search, Filter, MoreVertical, Trash2, FileAudio, Mic
+  Play, Pause, Calendar, Search, Filter, MoreVertical, Trash2, Mic
 } from "lucide-react";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
@@ -26,6 +28,11 @@ import {
 export default function MemosPage() {
   const { memos, deleteMemo } = useMemos();
 
+  const router = useRouter();
+  const supabase = createClient();
+  const [folders, setFolders] = useState<Array<{ id: string; name: string }>>([]);
+  const [foldersLoaded, setFoldersLoaded] = useState(false);
+
   const [filteredMemos, setFilteredMemos] = useState(memos);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("all");
@@ -33,7 +40,36 @@ export default function MemosPage() {
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const [playingId, setPlayingId] = useState<string | null>(null);
 
-  const categories = ["all", ...Array.from(new Set(memos.map((m) => m.category).filter(Boolean)))];
+  const categories = ["all", ...folders.map((f) => f.name)];
+
+  useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      const { data, error } = await supabase.auth.getUser();
+      const user = data?.user;
+
+      if (!user || error) {
+        router.replace("/login");
+        return;
+      }
+
+      const { data: folderRows } = await supabase
+        .from("folders")
+        .select("id,name")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: true });
+
+      if (!mounted) return;
+      setFolders((folderRows ?? []) as Array<{ id: string; name: string }>);
+      setFoldersLoaded(true);
+    })();
+
+    return () => {
+      mounted = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let filtered = [...memos];
@@ -67,6 +103,9 @@ export default function MemosPage() {
           <div>
             <h1 className="text-3xl font-bold mb-2">All Memos</h1>
             <p className="text-muted-foreground">{filteredMemos.length} memos found</p>
+            {!foldersLoaded && (
+              <p className="text-xs text-muted-foreground mt-1">Loading your folders…</p>
+            )}
           </div>
         </div>
 
@@ -83,7 +122,7 @@ export default function MemosPage() {
           <Select value={selectedCategory} onValueChange={setSelectedCategory}>
             <SelectTrigger className="w-full md:w-[200px]">
               <Filter className="h-4 w-4 mr-2" />
-              <SelectValue placeholder="All Categories" />
+              <SelectValue placeholder="All Folders" />
             </SelectTrigger>
             <SelectContent>
               {categories.map((cat) => (
@@ -100,11 +139,16 @@ export default function MemosPage() {
                 <div className="flex justify-between items-start">
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
-                      {memo.category === "Upload" ? <FileAudio className="h-4 w-4 text-primary" /> : <Mic className="h-4 w-4 text-primary" />}
+                      <Mic className="h-4 w-4 text-primary" />
                       <CardTitle className="text-base truncate max-w-[180px]">{memo.title}</CardTitle>
                     </div>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       <Calendar className="h-3 w-3" /> {memo.date}
+                    </div>
+                    <div className="pt-1">
+                      <Badge variant="outline" className="text-[10px]">
+                        {memo.category || "Unfiled"}
+                      </Badge>
                     </div>
                   </div>
                   <DropdownMenu>
