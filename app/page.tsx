@@ -9,7 +9,7 @@ import { useState, useRef, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Mic, Square, Play, Pause, FileAudio } from "lucide-react";
+import { Mic, Square, Play, Pause, FileAudio, Loader2 } from "lucide-react";
 import { Navbar } from "@/components/ui/navbar";
 import { useMemos } from "@/app/context/MemoContext";
 import { createClient } from "@/lib/supabase/browser";
@@ -20,6 +20,7 @@ export default function HomePage() {
   const [recording, setRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const supabase = createClient();
   const [username, setUsername] = useState<string | null>(null);
@@ -35,6 +36,7 @@ export default function HomePage() {
   const [playbackSpeeds, setPlaybackSpeeds] = useState<Record<string, number>>({});
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [currentTimes, setCurrentTimes] = useState<Record<string, number>>({});
+  const [durations, setDurations] = useState<Record<string, number>>({});
 
   useEffect(() => {
     let mounted = true;
@@ -84,11 +86,55 @@ export default function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const processAudioWithGemini = async (audioBlob: Blob, fileName?: string) => {
+    setIsProcessing(true);
+    setError(null);
+    
+    const formData = new FormData();
+    formData.append('audio', audioBlob, fileName || 'recording.webm');
+
+    try {
+      const response = await fetch('/api/gemini', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to process audio');
+      }
+
+      const data = await response.json();
+      
+      // Create audio URL for playback
+      const audioUrl = URL.createObjectURL(audioBlob);
+      
+      // Add memo with transcription data
+      addMemo({
+        id: Date.now().toString(),
+        title: data.label || `Memo ${memos.length + 1}`,
+        status: "ready",
+        date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        audioUrl: audioUrl,
+        category: folders.find((f) => f.id === selectedFolderId)?.name ?? "Personal",
+        ...(data.transcription && { transcription: data.transcription })
+      });
+
+    } catch (error: any) {
+      console.error('Error processing audio:', error);
+      setError(error.message || 'Failed to process audio');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   const startRecording = async () => {
     try {
       setError(null);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm',
+      });
       
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
@@ -97,20 +143,12 @@ export default function HomePage() {
         if (e.data.size > 0) audioChunksRef.current.push(e.data);
       };
 
-      mediaRecorder.onstop = () => {
+      mediaRecorder.onstop = async () => {
         stream.getTracks().forEach(track => track.stop());
-        const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType });
-        const audioUrl = URL.createObjectURL(audioBlob);
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         
-        addMemo({
-          id: Date.now().toString(),
-          title: `Recorded Memo ${memos.length + 1}`,
-          status: "ready",
-          date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-          audioUrl,
-          category:
-            folders.find((f) => f.id === selectedFolderId)?.name ?? "Personal",
-        });
+        // Process with Gemini
+        await processAudioWithGemini(audioBlob);
         
         setRecording(false);
         setRecordingTime(0);
@@ -181,7 +219,7 @@ export default function HomePage() {
             <Card className="border-2">
               <CardHeader><CardTitle>Record a Memo</CardTitle></CardHeader>
               <CardContent className="space-y-3">
-                <p className="text-sm text-muted-foreground">Up to 2 minutes.</p>
+                <p className="text-sm text-muted-foreground">Up to 2 minutes. AI will transcribe automatically.</p>
                 <div className="space-y-2">
                   <p className="text-xs text-muted-foreground">Save to folder</p>
                   <select
@@ -201,9 +239,29 @@ export default function HomePage() {
                     )}
                   </select>
                 </div>
-                <Button className="w-full" onClick={recording ? stopRecording : startRecording} variant={recording ? "destructive" : "default"}>
-                  {recording ? <><Square className="mr-2 h-4 w-4" /> Stop ({formatTime(recordingTime)})</> : <><Mic className="mr-2 h-4 w-4" /> Start Recording</>}
+                <Button 
+                  className="w-full" 
+                  onClick={recording ? stopRecording : startRecording} 
+                  variant={recording ? "destructive" : "default"}
+                  disabled={isProcessing}
+                >
+                  {recording ? (
+                    <>
+                      <Square className="mr-2 h-4 w-4" /> Stop ({formatTime(recordingTime)})
+                    </>
+                  ) : (
+                    <>
+                      <Mic className="mr-2 h-4 w-4" /> Start Recording
+                    </>
+                  )}
                 </Button>
+                {isProcessing && (
+                  <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>Processing with AI...</span>
+                  </div>
+                )}
+                {error && <p className="text-xs text-destructive mt-2">{error}</p>}
               </CardContent>
             </Card>
           </div>
@@ -220,13 +278,26 @@ export default function HomePage() {
               ) : (
                 memos.slice(0, 5).map((m) => (
                   <div key={m.id} className="flex flex-col rounded-xl border-2 p-4 space-y-3">
-                    <div className="flex justify-between items-center">
-                      <div className="flex items-center gap-2">
-                        {m.category === "Upload" ? <FileAudio className="h-4 w-4 text-muted-foreground" /> : <Mic className="h-4 w-4 text-muted-foreground" />}
-                        <h3 className="text-sm font-semibold truncate max-w-[150px]">{m.title}</h3>
+                    <div className="flex justify-between items-start gap-2">
+                      <div className="flex items-start gap-2 flex-1 min-w-0">
+                        {m.category === "Upload" ? (
+                          <FileAudio className="h-4 w-4 text-muted-foreground mt-0.5 flex-shrink-0" />
+                        ) : (
+                          <Mic className="h-4 w-4 text-muted-foreground mt-0.5 flex-shrink-0" />
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <h3 className="text-sm font-semibold truncate">{m.title}</h3>
+                        </div>
                       </div>
-                      <Badge variant="outline" className="text-[10px]">{m.category}</Badge>
+                      <Badge variant="outline" className="text-[10px] flex-shrink-0">{m.category}</Badge>
                     </div>
+                    
+                    {m.transcription && (
+                      <div className="text-xs text-muted-foreground bg-muted/50 rounded p-2">
+                        <p className="line-clamp-3">{m.transcription}</p>
+                      </div>
+                    )}
+                    
                     {m.audioUrl && (
                       <>
                         <audio 
@@ -237,15 +308,33 @@ export default function HomePage() {
                             const time = e.currentTarget.currentTime;
                             setCurrentTimes(prev => ({ ...prev, [m.id]: time }));
                           }}
+                          onLoadedMetadata={(e) => {
+                            const duration = e.currentTarget.duration;
+                            setDurations(prev => ({ ...prev, [m.id]: duration }));
+                          }}
                           hidden 
                         />
+                        
+                        {/* Progress Bar */}
+                        <div className="w-full bg-muted rounded-full h-1.5">
+                          <div 
+                            className="bg-primary h-1.5 rounded-full transition-all duration-100"
+                            style={{ 
+                              width: `${durations[m.id] ? (currentTimes[m.id] / durations[m.id]) * 100 : 0}%` 
+                            }}
+                          />
+                        </div>
+                        
                         <div className="flex items-center gap-2">
                           <Button size="sm" variant="outline" onClick={() => togglePlay(m.id)}>
                             {playingId === m.id ? <Pause className="h-3 w-3 mr-1" /> : <Play className="h-3 w-3 mr-1" />}
                             {playingId === m.id ? "Pause" : "Play"}
                           </Button>
+                          <Button size="sm" variant="ghost" onClick={() => toggleSpeed(m.id)}>
+                            {playbackSpeeds[m.id] || 1}x
+                          </Button>
                           <span className="text-xs ml-auto font-mono text-muted-foreground">
-                             {formatTime(currentTimes[m.id] || 0)}
+                            {formatTime(currentTimes[m.id] || 0)} / {formatTime(durations[m.id] || 0)}
                           </span>
                         </div>
                       </>

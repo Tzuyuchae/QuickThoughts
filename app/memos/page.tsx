@@ -137,10 +137,10 @@ export default function MemosPage() {
             <Card key={memo.id} className="border-2 group">
               <CardHeader className="pb-3">
                 <div className="flex justify-between items-start">
-                  <div className="space-y-1">
+                  <div className="space-y-1 flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <Mic className="h-4 w-4 text-primary" />
-                      <CardTitle className="text-base truncate max-w-[180px]">{memo.title}</CardTitle>
+                      <Mic className="h-4 w-4 text-primary flex-shrink-0" />
+                      <CardTitle className="text-base truncate">{memo.title}</CardTitle>
                     </div>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       <Calendar className="h-3 w-3" /> {memo.date}
@@ -153,7 +153,7 @@ export default function MemosPage() {
                   </div>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="icon" className="h-8 w-8"><MoreVertical className="h-4 w-4" /></Button>
+                      <Button variant="ghost" size="icon" className="h-8 w-8 flex-shrink-0"><MoreVertical className="h-4 w-4" /></Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
                       <DropdownMenuItem className="text-destructive" onClick={() => deleteMemo(memo.id)}>
@@ -163,7 +163,13 @@ export default function MemosPage() {
                   </DropdownMenu>
                 </div>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-3">
+                {memo.transcription && (
+                  <div className="text-xs text-muted-foreground bg-muted/50 rounded p-2">
+                    <p className="line-clamp-3">{memo.transcription}</p>
+                  </div>
+                )}
+                
                 {memo.audioUrl ? (
                   <>
                     <audio ref={el => { audioRefs.current[memo.id] = el; }} src={memo.audioUrl} onEnded={() => setPlayingId(null)} hidden />
