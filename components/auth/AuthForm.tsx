@@ -15,6 +15,19 @@ function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
 
+function getPasswordRequirementError(pw: string) {
+  const password = pw;
+  if (password.length < 8) return "Password must be at least 8 characters.";
+  if (!/[a-z]/.test(password)) return "Password must include at least 1 lowercase letter.";
+  if (!/[A-Z]/.test(password)) return "Password must include at least 1 uppercase letter.";
+  if (!/\d/.test(password)) return "Password must include at least 1 number.";
+  // Common special characters; includes spaces? no.
+  if (!/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?`~]/.test(password)) {
+    return "Password must include at least 1 special character.";
+  }
+  return null;
+}
+
 export default function AuthForm({ mode }: AuthFormProps) {
   const router = useRouter();
   const supabase = createClient();
@@ -23,6 +36,9 @@ export default function AuthForm({ mode }: AuthFormProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
   // Signup verification (6-digit code)
   const [signupStep, setSignupStep] = useState<"form" | "verify">("form");
@@ -37,6 +53,8 @@ export default function AuthForm({ mode }: AuthFormProps) {
     setStatus(null);
     setSignupStep("form");
     setCode("");
+    setShowPassword(false);
+    setShowConfirmPassword(false);
   }, [mode]);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
@@ -51,14 +69,16 @@ export default function AuthForm({ mode }: AuthFormProps) {
       return;
     }
 
-    if (password.length < 8) {
-      setError("Password must be at least 8 characters.");
-      return;
-    }
+    // Password requirement checks are handled below for signup only
 
     if (isSignup) {
       // Step 1: collect email + password + confirm, then send code
       if (signupStep === "form") {
+        const pwReqError = getPasswordRequirementError(password);
+        if (pwReqError) {
+          setError(pwReqError);
+          return;
+        }
         if (password !== confirmPassword) {
           setError("Passwords do not match.");
           return;
@@ -185,36 +205,79 @@ export default function AuthForm({ mode }: AuthFormProps) {
         {(!isSignup || signupStep === "form") && (
           <label style={{ display: "grid", gap: 6 }}>
             <span>Password</span>
-            <input
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              type="password"
-              autoComplete={isSignup ? "new-password" : "current-password"}
-              style={{
-                padding: 10,
-                borderRadius: 10,
-                border: "1px solid #ccc",
-              }}
-            />
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                type={showPassword ? "text" : "password"}
+                autoComplete={isSignup ? "new-password" : "current-password"}
+                style={{
+                  padding: 10,
+                  borderRadius: 10,
+                  border: "1px solid #ccc",
+                  flex: 1,
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "1px solid #ccc",
+                  background: "transparent",
+                  cursor: "pointer",
+                  lineHeight: 1,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {showPassword ? "Hide" : "Show"}
+              </button>
+            </div>
+            {isSignup && (
+              <p style={{ margin: 0, opacity: 0.75, fontSize: 12 }}>
+                Min 8 chars, 1 uppercase, 1 lowercase, 1 number, 1 special character.
+              </p>
+            )}
           </label>
         )}
 
         {isSignup && signupStep === "form" && (
           <label style={{ display: "grid", gap: 6 }}>
             <span>Confirm password</span>
-            <input
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              placeholder="••••••••"
-              type="password"
-              autoComplete="new-password"
-              style={{
-                padding: 10,
-                borderRadius: 10,
-                border: "1px solid #ccc",
-              }}
-            />
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="••••••••"
+                type={showConfirmPassword ? "text" : "password"}
+                autoComplete="new-password"
+                style={{
+                  padding: 10,
+                  borderRadius: 10,
+                  border: "1px solid #ccc",
+                  flex: 1,
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirmPassword((v) => !v)}
+                aria-label={showConfirmPassword ? "Hide confirm password" : "Show confirm password"}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "1px solid #ccc",
+                  background: "transparent",
+                  cursor: "pointer",
+                  lineHeight: 1,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {showConfirmPassword ? "Hide" : "Show"}
+              </button>
+            </div>
           </label>
         )}
 

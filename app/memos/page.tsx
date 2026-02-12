@@ -6,7 +6,7 @@
 "use client";
 
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/browser";
 import { Navbar } from "@/components/ui/navbar";
@@ -19,7 +19,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Play, Pause, Calendar, Search, Filter, MoreVertical, Trash2, Mic
+  Calendar, Search, Filter, MoreVertical, Trash2, Mic
 } from "lucide-react";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
@@ -37,10 +37,16 @@ export default function MemosPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("all");
 
-  const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
-  const [playingId, setPlayingId] = useState<string | null>(null);
-
-  const categories = ["all", ...folders.map((f) => f.name)];
+  const categories = [
+    "all",
+    ...Array.from(
+      new Set([
+        "Unsorted",
+        ...folders.map((f) => f.name),
+        ...memos.map((m) => m.category).filter(Boolean) as string[],
+      ])
+    ),
+  ];
 
   useEffect(() => {
     let mounted = true;
@@ -74,7 +80,12 @@ export default function MemosPage() {
   useEffect(() => {
     let filtered = [...memos];
     if (searchQuery) {
-      filtered = filtered.filter(m => m.title.toLowerCase().includes(searchQuery.toLowerCase()));
+      const q = searchQuery.toLowerCase();
+      filtered = filtered.filter((m) => {
+        const inTitle = m.title.toLowerCase().includes(q);
+        const inTranscript = (m.transcription ?? "").toLowerCase().includes(q);
+        return inTitle || inTranscript;
+      });
     }
     if (selectedCategory !== "all") {
       filtered = filtered.filter(m => m.category === selectedCategory);
@@ -82,18 +93,15 @@ export default function MemosPage() {
     setFilteredMemos(filtered);
   }, [searchQuery, selectedCategory, memos]);
 
-  const togglePlay = (id: string) => {
-    const audio = audioRefs.current[id];
-    if (!audio) return;
-    if (playingId && playingId !== id) audioRefs.current[playingId]?.pause();
-    if (audio.paused) {
-      audio.play();
-      setPlayingId(id);
-    } else {
-      audio.pause();
-      setPlayingId(null);
+  useEffect(() => {
+    if (!foldersLoaded) return;
+    if (selectedCategory === "all") return;
+    const allowed = new Set(categories);
+    if (!allowed.has(selectedCategory)) {
+      setSelectedCategory("all");
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [foldersLoaded, folders, memos]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -126,15 +134,21 @@ export default function MemosPage() {
             </SelectTrigger>
             <SelectContent>
               {categories.map((cat) => (
-                <SelectItem key={cat} value={cat!}>{cat === "all" ? "All Categories" : cat}</SelectItem>
+                <SelectItem key={cat} value={cat!}>{cat === "all" ? "All Folders" : cat}</SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filteredMemos.map((memo) => (
-            <Card key={memo.id} className="border-2 group">
+        {filteredMemos.length === 0 ? (
+          <div className="rounded-lg border border-dashed p-10 text-center text-muted-foreground">
+            <p className="text-sm font-medium">No memos match your filters.</p>
+            <p className="text-xs mt-1">Try clearing the search or choosing a different folder.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {filteredMemos.map((memo) => (
+              <Card key={memo.id} className="border-2 group">
               <CardHeader className="pb-3">
                 <div className="flex justify-between items-start">
                   <div className="space-y-1 flex-1 min-w-0">
@@ -147,7 +161,7 @@ export default function MemosPage() {
                     </div>
                     <div className="pt-1">
                       <Badge variant="outline" className="text-[10px]">
-                        {memo.category || "Unfiled"}
+                        {memo.category || "Unsorted"}
                       </Badge>
                     </div>
                   </div>
@@ -170,21 +184,12 @@ export default function MemosPage() {
                   </div>
                 )}
                 
-                {memo.audioUrl ? (
-                  <>
-                    <audio ref={el => { audioRefs.current[memo.id] = el; }} src={memo.audioUrl} onEnded={() => setPlayingId(null)} hidden />
-                    <Button variant="outline" size="sm" onClick={() => togglePlay(memo.id)}>
-                      {playingId === memo.id ? <Pause className="h-4 w-4 mr-2" /> : <Play className="h-4 w-4 mr-2" />}
-                      {playingId === memo.id ? "Pause" : "Play"}
-                    </Button>
-                  </>
-                ) : (
-                  <p className="text-xs text-muted-foreground italic">No audio for example.</p>
-                )}
+                {/* Audio playback removed – memos are text-only */}
               </CardContent>
             </Card>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </main>
     </div>
   );

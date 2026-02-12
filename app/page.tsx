@@ -9,7 +9,7 @@ import { useState, useRef, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Mic, Square, Play, Pause, FileAudio, Loader2 } from "lucide-react";
+import { Mic, Square, Loader2 } from "lucide-react";
 import { Navbar } from "@/components/ui/navbar";
 import { useMemos } from "@/app/context/MemoContext";
 import { createClient } from "@/lib/supabase/browser";
@@ -25,19 +25,12 @@ export default function HomePage() {
   const supabase = createClient();
   const [username, setUsername] = useState<string | null>(null);
   const [folders, setFolders] = useState<Array<{ id: string; name: string }>>([]);
-  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<BlobPart[]>([]);
-  const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const recordingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
-  const [playbackSpeeds, setPlaybackSpeeds] = useState<Record<string, number>>({});
-  const [playingId, setPlayingId] = useState<string | null>(null);
-  const [currentTimes, setCurrentTimes] = useState<Record<string, number>>({});
-  const [durations, setDurations] = useState<Record<string, number>>({});
-
   useEffect(() => {
     let mounted = true;
 
@@ -66,10 +59,6 @@ export default function HomePage() {
         const nextFolders = (folderRows ?? []) as Array<{ id: string; name: string }>;
         setFolders(nextFolders);
 
-        // Default selection: first folder (if any)
-        if (!selectedFolderId && nextFolders.length > 0) {
-          setSelectedFolderId(nextFolders[0].id);
-        }
       } catch {
         // ignore; page can still render
       }
@@ -106,18 +95,44 @@ export default function HomePage() {
 
       const data = await response.json();
       
-      // Create audio URL for playback
-      const audioUrl = URL.createObjectURL(audioBlob);
-      
-      // Add memo with transcription data
-      addMemo({
-        id: Date.now().toString(),
-        title: data.label || `Memo ${memos.length + 1}`,
-        status: "ready",
-        date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-        audioUrl: audioUrl,
-        category: folders.find((f) => f.id === selectedFolderId)?.name ?? "Personal",
-        ...(data.transcription && { transcription: data.transcription })
+      const dateLabel = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+      const thoughts: Array<{ text: string; label?: string; folder?: string }> = Array.isArray(data?.thoughts)
+        ? data.thoughts
+        : [];
+
+      const safeThoughts = thoughts
+        .map((t) => ({
+          text: String(t?.text ?? '').trim(),
+          label: String(t?.label ?? '').trim(),
+          folder: String(t?.folder ?? 'Unsorted').trim() || 'Unsorted',
+        }))
+        .filter((t) => t.text.length > 0)
+        .slice(0, 10);
+
+      // If no thoughts returned, fall back to a single memo using the full transcription
+      if (safeThoughts.length === 0) {
+        addMemo({
+          id: `${Date.now()}`,
+          title: data?.label || `Memo ${memos.length + 1}`,
+          status: "ready",
+          date: dateLabel,
+          category: "Unsorted",
+          ...(data?.transcription && { transcription: String(data.transcription) }),
+        });
+        return;
+      }
+
+      // Create a memo per extracted thought, categorized by the folder name returned by the API.
+      safeThoughts.forEach((t, idx) => {
+        addMemo({
+          id: `${Date.now()}-${idx}`,
+          title: t.label || `Memo ${memos.length + 1 + idx}`,
+          status: "ready",
+          date: dateLabel,
+          category: t.folder,
+          transcription: t.text,
+        });
       });
 
     } catch (error: any) {
@@ -176,28 +191,6 @@ export default function HomePage() {
     if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current);
   };
 
-  const togglePlay = (id: string) => {
-    const audio = audioRefs.current[id];
-    if (!audio) return;
-    if (playingId && playingId !== id) audioRefs.current[playingId]?.pause();
-    if (audio.paused) {
-      audio.play().catch(() => setError("Playback failed"));
-      setPlayingId(id);
-    } else {
-      audio.pause();
-      setPlayingId(null);
-    }
-  };
-
-  const toggleSpeed = (id: string) => {
-    const audio = audioRefs.current[id];
-    if (!audio) return;
-    const current = playbackSpeeds[id] || 1;
-    const newSpeed = current === 1 ? 1.5 : current === 1.5 ? 2 : 1;
-    setPlaybackSpeeds(prev => ({ ...prev, [id]: newSpeed }));
-    audio.playbackRate = newSpeed;
-  };
-
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
@@ -220,25 +213,9 @@ export default function HomePage() {
               <CardHeader><CardTitle>Record a Memo</CardTitle></CardHeader>
               <CardContent className="space-y-3">
                 <p className="text-sm text-muted-foreground">Up to 2 minutes. AI will transcribe automatically.</p>
-                <div className="space-y-2">
-                  <p className="text-xs text-muted-foreground">Save to folder</p>
-                  <select
-                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    value={selectedFolderId ?? ""}
-                    onChange={(e) => setSelectedFolderId(e.target.value)}
-                    disabled={folders.length === 0}
-                  >
-                    {folders.length === 0 ? (
-                      <option value="">No folders found (finish onboarding)</option>
-                    ) : (
-                      folders.map((f) => (
-                        <option key={f.id} value={f.id}>
-                          {f.name}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </div>
+                <p className="text-xs text-muted-foreground">
+                  Your memo will be automatically split into thoughts and sorted into your existing folders.
+                </p>
                 <Button 
                   className="w-full" 
                   onClick={recording ? stopRecording : startRecording} 
@@ -280,11 +257,7 @@ export default function HomePage() {
                   <div key={m.id} className="flex flex-col rounded-xl border-2 p-4 space-y-3">
                     <div className="flex justify-between items-start gap-2">
                       <div className="flex items-start gap-2 flex-1 min-w-0">
-                        {m.category === "Upload" ? (
-                          <FileAudio className="h-4 w-4 text-muted-foreground mt-0.5 flex-shrink-0" />
-                        ) : (
-                          <Mic className="h-4 w-4 text-muted-foreground mt-0.5 flex-shrink-0" />
-                        )}
+                        <Mic className="h-4 w-4 text-muted-foreground mt-0.5 flex-shrink-0" />
                         <div className="flex-1 min-w-0">
                           <h3 className="text-sm font-semibold truncate">{m.title}</h3>
                         </div>
@@ -298,47 +271,6 @@ export default function HomePage() {
                       </div>
                     )}
                     
-                    {m.audioUrl && (
-                      <>
-                        <audio 
-                          ref={el => { audioRefs.current[m.id] = el; }} 
-                          src={m.audioUrl} 
-                          onEnded={() => setPlayingId(null)} 
-                          onTimeUpdate={(e) => {
-                            const time = e.currentTarget.currentTime;
-                            setCurrentTimes(prev => ({ ...prev, [m.id]: time }));
-                          }}
-                          onLoadedMetadata={(e) => {
-                            const duration = e.currentTarget.duration;
-                            setDurations(prev => ({ ...prev, [m.id]: duration }));
-                          }}
-                          hidden 
-                        />
-                        
-                        {/* Progress Bar */}
-                        <div className="w-full bg-muted rounded-full h-1.5">
-                          <div 
-                            className="bg-primary h-1.5 rounded-full transition-all duration-100"
-                            style={{ 
-                              width: `${durations[m.id] ? (currentTimes[m.id] / durations[m.id]) * 100 : 0}%` 
-                            }}
-                          />
-                        </div>
-                        
-                        <div className="flex items-center gap-2">
-                          <Button size="sm" variant="outline" onClick={() => togglePlay(m.id)}>
-                            {playingId === m.id ? <Pause className="h-3 w-3 mr-1" /> : <Play className="h-3 w-3 mr-1" />}
-                            {playingId === m.id ? "Pause" : "Play"}
-                          </Button>
-                          <Button size="sm" variant="ghost" onClick={() => toggleSpeed(m.id)}>
-                            {playbackSpeeds[m.id] || 1}x
-                          </Button>
-                          <span className="text-xs ml-auto font-mono text-muted-foreground">
-                            {formatTime(currentTimes[m.id] || 0)} / {formatTime(durations[m.id] || 0)}
-                          </span>
-                        </div>
-                      </>
-                    )}
                   </div>
                 ))
               )}

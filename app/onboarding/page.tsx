@@ -4,7 +4,23 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/browser";
 
-const DEFAULT_FOLDERS = ["Ideas", "Todo", "School", "Memories", "Work", "Family"];
+const DEFAULT_FOLDERS = [
+  "Ideas",
+  "School",
+  "Work",
+  "Projects",
+  "Reminders",
+  "Follow Ups",
+  "Meetings & Conversations",
+  "Content Creation",
+  "Fitness & Health",
+  "Personal Growth",
+  "Money & Finances",
+  "Relationships",
+  "Music & Creative",
+  "Research & Learning",
+  "Miscellaneous",
+];
 
 type Step = "username" | "folders";
 
@@ -97,9 +113,13 @@ export default function OnboardingPage() {
         return;
       }
 
-      // Insert folders (unique constraint prevents duplicates)
+      // Always ensure "Unsorted" exists (not shown during onboarding)
+      const foldersToInsert = Array.from(
+        new Set(["Unsorted", ...chosenFolders])
+      );
+
       const { error: folderErr } = await supabase.from("folders").insert(
-        chosenFolders.map((name) => ({
+        foldersToInsert.map((name) => ({
           user_id: user.id,
           name,
         }))
