@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import Image from "next/image"
+import Link from "next/link"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
@@ -10,8 +11,6 @@ import { toast } from "sonner"
 import { useRouter } from "next/navigation"
 import { createClient } from "@/lib/supabase/browser"
 import { DotGridBackground } from "@/components/ui/dot-grid-background"
-
-type FormMode = "login" | "signup"
 
 export default function LoginPage() {
   return (
@@ -33,7 +32,6 @@ export default function LoginPage() {
 
 function LoginForm() {
   const router = useRouter()
-  const [mode, setMode] = useState<FormMode>("login")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [showPassword, setShowPassword] = useState(false)
@@ -68,7 +66,7 @@ function LoginForm() {
         <Image
           src="/images/logo.png"
           alt="Quick Thoughts logo"
-          width={300}
+          width={220}
           height={64}
           priority
           className="h-14 w-auto"
@@ -76,13 +74,11 @@ function LoginForm() {
       </div>
 
       {/* Heading */}
-      <h1 className="text-xl mb-2 text-center font-heading text-4xl font-bold tracking-tight text-foreground text-balance md:text-5xl">
-        {mode === "login" ? "Welcome Back" : "Get Started"}
+      <h1 className="mb-2 text-center font-heading text-4xl font-bold tracking-tight text-foreground text-balance md:text-5xl">
+        Welcome Back
       </h1>
       <p className="mb-10 text-center text-base text-muted-foreground text-pretty">
-        {mode === "login"
-          ? "Sign in to access your voice memos and transcriptions"
-          : "Create an account to start capturing your thoughts"}
+        Sign in to access your voice memos and transcriptions
       </p>
 
       {/* Form */}
@@ -114,7 +110,7 @@ function LoginForm() {
               placeholder="Enter your password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
+              autoComplete="current-password"
               required
               className="h-12 rounded-xl border-border bg-secondary/40 pr-12 px-4 text-foreground placeholder:text-muted-foreground focus-visible:ring-accent"
             />
@@ -131,14 +127,12 @@ function LoginForm() {
               )}
             </button>
           </div>
-          {mode === "login" && (
-            <button
-              type="button"
-              className="self-end text-xs text-muted-foreground transition-colors hover:text-accent"
-            >
-              Forgot password?
-            </button>
-          )}
+          <button
+            type="button"
+            className="self-end text-xs text-muted-foreground transition-colors hover:text-accent"
+          >
+            Forgot password?
+          </button>
         </div>
 
         <Button
@@ -147,21 +141,20 @@ function LoginForm() {
           className="group mt-2 h-12 w-full rounded-xl bg-accent text-accent-foreground font-semibold transition-all hover:bg-accent/90"
           size="lg"
         >
-          <span>{loading ? "Signing in..." : mode === "login" ? "Sign In" : "Create Account"}</span>
+          <span>{loading ? "Signing in..." : "Sign In"}</span>
           <ArrowRight className="ml-2 size-4 transition-transform group-hover:translate-x-0.5" />
         </Button>
       </form>
 
-      {/* Mode toggle */}
+      {/* Signup link */}
       <p className="mt-8 text-sm text-muted-foreground">
-        {mode === "login" ? "New to Quick Thoughts? " : "Already have an account? "}
-        <button
-          type="button"
-          onClick={() => setMode(mode === "login" ? "signup" : "login")}
+        New to Quick Thoughts?{" "}
+        <Link
+          href="/signup"
           className="font-medium text-accent underline-offset-4 transition-colors hover:text-accent/80 hover:underline"
         >
-          {mode === "login" ? "Create an account" : "Sign in"}
-        </button>
+          Create an account
+        </Link>
       </p>
 
       {/* Terms */}
