@@ -1,8 +1,16 @@
-"use client";
+"use client"
 
-import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/browser";
+import { useEffect, useMemo, useState } from "react"
+import Image from "next/image"
+import { useRouter } from "next/navigation"
+import { createClient } from "@/lib/supabase/browser"
+import { Input } from "@/components/ui/input"
+import { Button } from "@/components/ui/button"
+import { Label } from "@/components/ui/label"
+import { ArrowRight, ArrowLeft, Check } from "lucide-react"
+import { toast } from "sonner"
+import { DotGridBackground } from "@/components/ui/dot-grid-background"
+import { Checkbox } from "@/components/ui/checkbox"
 
 const DEFAULT_FOLDERS = [
   "Ideas",
@@ -20,60 +28,75 @@ const DEFAULT_FOLDERS = [
   "Music & Creative",
   "Research & Learning",
   "Miscellaneous",
-];
+]
 
-type Step = "username" | "folders";
+type Step = "username" | "folders"
 
 export default function OnboardingPage() {
-  const router = useRouter();
-  const supabase = createClient();
+  return (
+    <main className="relative flex min-h-screen w-full flex-col items-center justify-center overflow-hidden bg-background p-4">
+      <DotGridBackground />
 
-  const [step, setStep] = useState<Step>("username");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+      {/* Radial glow behind the form */}
+      <div
+        className="pointer-events-none absolute left-1/2 top-1/2 z-0 -translate-x-1/2 -translate-y-1/2"
+        aria-hidden="true"
+      >
+        <div className="size-[600px] rounded-full bg-accent/5 blur-[120px]" />
+      </div>
 
-  const [username, setUsername] = useState("");
+      <OnboardingForm />
+    </main>
+  )
+}
+
+function OnboardingForm() {
+  const router = useRouter()
+  const supabase = createClient()
+
+  const [step, setStep] = useState<Step>("username")
+  const [loading, setLoading] = useState(false)
+
+  const [username, setUsername] = useState("")
   const [selected, setSelected] = useState<Record<string, boolean>>(
     Object.fromEntries(DEFAULT_FOLDERS.map((f) => [f, true]))
-  );
+  )
 
   const chosenFolders = useMemo(
     () => Object.entries(selected).filter(([, v]) => v).map(([k]) => k),
     [selected]
-  );
+  )
 
-  // Ensure user is logged in (onboarding is protected anyway, but this helps)
+  // Ensure user is logged in
   useEffect(() => {
-    (async () => {
-      const { data } = await supabase.auth.getUser();
-      if (!data.user) router.replace("/login");
-    })();
-  }, [router, supabase]);
+    ;(async () => {
+      const { data } = await supabase.auth.getUser()
+      if (!data.user) router.replace("/login")
+    })()
+  }, [router, supabase])
 
   async function saveUsername() {
-    setError(null);
-
-    const clean = username.trim();
+    const clean = username.trim()
 
     if (clean.length < 3) {
-      setError("Username must be at least 3 characters.");
-      return;
+      toast.error("Username must be at least 3 characters.")
+      return
     }
     if (!/^[a-zA-Z0-9_]+$/.test(clean)) {
-      setError("Username can only contain letters, numbers, and underscores.");
-      return;
+      toast.error("Username can only contain letters, numbers, and underscores.")
+      return
     }
 
-    setLoading(true);
+    setLoading(true)
     try {
-      const { data: userRes } = await supabase.auth.getUser();
-      const user = userRes.user;
+      const { data: userRes } = await supabase.auth.getUser()
+      const user = userRes.user
       if (!user) {
-        router.replace("/login");
-        return;
+        router.replace("/login")
+        return
       }
 
-      // create profile row if missing, then set username
+      // Create profile row if missing, then set username
       const { error: upsertErr } = await supabase
         .from("profiles")
         .upsert(
@@ -83,54 +106,51 @@ export default function OnboardingPage() {
             onboarding_complete: false,
           },
           { onConflict: "user_id" }
-        );
+        )
 
       if (upsertErr) {
-        setError(upsertErr.message);
-        return;
+        toast.error(upsertErr.message)
+        return
       }
 
-      setStep("folders");
+      toast.success("Username saved!")
+      setStep("folders")
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
   }
 
   async function finishOnboarding() {
-    setError(null);
-
     if (chosenFolders.length === 0) {
-      setError("Select at least one folder.");
-      return;
+      toast.error("Select at least one folder.")
+      return
     }
 
-    setLoading(true);
+    setLoading(true)
     try {
-      const { data: userRes } = await supabase.auth.getUser();
-      const user = userRes.user;
+      const { data: userRes } = await supabase.auth.getUser()
+      const user = userRes.user
       if (!user) {
-        router.replace("/login");
-        return;
+        router.replace("/login")
+        return
       }
 
       // Always ensure "Unsorted" exists (not shown during onboarding)
-      const foldersToInsert = Array.from(
-        new Set(["Unsorted", ...chosenFolders])
-      );
+      const foldersToInsert = Array.from(new Set(["Unsorted", ...chosenFolders]))
 
       const { error: folderErr } = await supabase.from("folders").insert(
         foldersToInsert.map((name) => ({
           user_id: user.id,
           name,
         }))
-      );
+      )
 
       if (folderErr) {
-        // If user refreshes and tries again, it may complain about duplicates; you can ignore that
-        const msg = folderErr.message.toLowerCase();
+        // If user refreshes and tries again, it may complain about duplicates
+        const msg = folderErr.message.toLowerCase()
         if (!msg.includes("duplicate") && !msg.includes("unique")) {
-          setError(folderErr.message);
-          return;
+          toast.error(folderErr.message)
+          return
         }
       }
 
@@ -143,163 +163,198 @@ export default function OnboardingPage() {
             onboarding_complete: true,
           },
           { onConflict: "user_id" }
-        );
+        )
 
       if (profErr) {
-        setError(profErr.message);
-        return;
+        toast.error(profErr.message)
+        return
       }
 
-      router.replace("/memos");
-      router.refresh();
+      toast.success("Setup complete! Welcome to Quick Thoughts! 🎉")
+      router.replace("/")
+      router.refresh()
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
   }
 
-  return (
-    <main style={{ maxWidth: 640, margin: "48px auto", padding: 16 }}>
-      <h1 style={{ fontSize: 30, fontWeight: 800, marginBottom: 8 }}>
-        Welcome to Quick Thoughts 👋
-      </h1>
+  if (step === "folders") {
+    return (
+      <div className="relative z-10 flex w-full max-w-3xl flex-col items-center px-6">
+        {/* Logo */}
+        <div className="mb-10">
+          <Image
+            src="/images/logo.png"
+            alt="Quick Thoughts logo"
+            width={220}
+            height={64}
+            priority
+            className="h-14 w-auto"
+          />
+        </div>
 
-      <ol style={{ lineHeight: 1.9, marginBottom: 18, opacity: 0.9 }}>
-        <li>Record your Thoughts</li>
-        <li>Let us extract and organize your Thoughts</li>
-        <li>View your organized thoughts in your notes</li>
-      </ol>
-
-      {step === "username" && (
-        <>
-          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 10 }}>
-            Choose a username
-          </h2>
-
-          <div style={{ display: "grid", gap: 10, marginBottom: 12 }}>
-            <input
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="e.g. mo_quickthoughts"
-              autoComplete="nickname"
-              style={{
-                padding: 12,
-                borderRadius: 12,
-                border: "1px solid #ccc",
-              }}
-            />
+        {/* Progress indicator */}
+        <div className="mb-8 flex items-center gap-2">
+          <div className="flex size-8 items-center justify-center rounded-full bg-accent text-sm font-bold text-accent-foreground">
+            <Check className="size-4" />
           </div>
-
-          {error && (
-            <div
-              style={{
-                background: "#ffe5e5",
-                border: "1px solid #ffb3b3",
-                padding: 10,
-                borderRadius: 10,
-                marginBottom: 12,
-              }}
-            >
-              {error}
-            </div>
-          )}
-
-          <button
-            onClick={saveUsername}
-            disabled={loading}
-            style={{
-              width: "100%",
-              padding: 12,
-              borderRadius: 12,
-              border: "none",
-              cursor: "pointer",
-              fontWeight: 700,
-            }}
-          >
-            {loading ? "Saving..." : "Continue"}
-          </button>
-        </>
-      )}
-
-      {step === "folders" && (
-        <>
-          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 10 }}>
-            Pick your preferred folders
-          </h2>
-
-          <div style={{ display: "grid", gap: 10, marginBottom: 18 }}>
-            {DEFAULT_FOLDERS.map((name) => (
-              <label
-                key={name}
-                style={{
-                  display: "flex",
-                  gap: 10,
-                  alignItems: "center",
-                  border: "1px solid #ddd",
-                  padding: 12,
-                  borderRadius: 12,
-                  cursor: "pointer",
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={!!selected[name]}
-                  onChange={() =>
-                    setSelected((s) => ({ ...s, [name]: !s[name] }))
-                  }
-                />
-                <span style={{ fontWeight: 600 }}>{name}</span>
-              </label>
-            ))}
+          <div className="h-px w-12 bg-accent" />
+          <div className="flex size-8 items-center justify-center rounded-full bg-accent text-sm font-bold text-accent-foreground">
+            2
           </div>
+        </div>
 
-          {error && (
-            <div
-              style={{
-                background: "#ffe5e5",
-                border: "1px solid #ffb3b3",
-                padding: 10,
-                borderRadius: 10,
-                marginBottom: 12,
-              }}
+        {/* Heading */}
+        <h1 className="mb-2 text-center font-heading text-4xl font-bold tracking-tight text-foreground text-balance md:text-5xl">
+          Choose Your Folders
+        </h1>
+        <p className="mb-10 text-center text-base text-muted-foreground text-pretty max-w-lg">
+          Select the folders you want to organize your thoughts into. You can always add more later.
+        </p>
+
+        {/* Folders Grid */}
+        <div className="mb-8 grid w-full grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {DEFAULT_FOLDERS.map((name) => (
+            <label
+              key={name}
+              className="flex cursor-pointer items-center gap-3 rounded-xl border border-border bg-secondary/40 px-5 py-4 transition-all hover:bg-secondary/60 hover:border-accent/50"
             >
-              {error}
-            </div>
-          )}
+              <Checkbox
+                checked={!!selected[name]}
+                onCheckedChange={() =>
+                  setSelected((s) => ({ ...s, [name]: !s[name] }))
+                }
+              />
+              <span className="text-sm font-medium text-foreground">{name}</span>
+            </label>
+          ))}
+        </div>
 
-          <button
+        {/* Selected count */}
+        <p className="mb-6 text-sm text-muted-foreground">
+          {chosenFolders.length} folder{chosenFolders.length !== 1 ? "s" : ""} selected
+        </p>
+
+        {/* Buttons */}
+        <div className="flex w-full flex-col gap-3">
+          <Button
             onClick={finishOnboarding}
             disabled={loading}
-            style={{
-              width: "100%",
-              padding: 12,
-              borderRadius: 12,
-              border: "none",
-              cursor: "pointer",
-              fontWeight: 700,
-            }}
+            className="group h-12 w-full rounded-xl bg-accent text-accent-foreground font-semibold transition-all hover:bg-accent/90"
+            size="lg"
           >
-            {loading ? "Finishing..." : "Finish setup"}
-          </button>
+            <span>{loading ? "Finishing..." : "Finish Setup"}</span>
+            <ArrowRight className="ml-2 size-4 transition-transform group-hover:translate-x-0.5" />
+          </Button>
 
-          <button
+          <Button
             type="button"
             onClick={() => setStep("username")}
             disabled={loading}
-            style={{
-              width: "100%",
-              marginTop: 10,
-              padding: 12,
-              borderRadius: 12,
-              background: "transparent",
-              cursor: "pointer",
-              fontWeight: 600,
-              border: "1px solid #ddd",
-            }}
+            variant="outline"
+            className="h-12 w-full rounded-xl border-border"
+            size="lg"
           >
-            Back
-          </button>
-        </>
-      )}
-    </main>
-  );
+            <ArrowLeft className="mr-2 size-4" />
+            <span>Back</span>
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="relative z-10 flex w-full max-w-md flex-col items-center px-6">
+      {/* Logo */}
+      <div className="mb-10">
+        <Image
+          src="/images/logo.png"
+          alt="Quick Thoughts logo"
+          width={220}
+          height={64}
+          priority
+          className="h-14 w-auto"
+        />
+      </div>
+
+      {/* Progress indicator */}
+      <div className="mb-8 flex items-center gap-2">
+        <div className="flex size-8 items-center justify-center rounded-full bg-accent text-sm font-bold text-accent-foreground">
+          1
+        </div>
+        <div className="h-px w-12 bg-border" />
+        <div className="flex size-8 items-center justify-center rounded-full border border-border bg-secondary/40 text-sm font-bold text-muted-foreground">
+          2
+        </div>
+      </div>
+
+      {/* Heading */}
+      <h1 className="mb-2 text-center font-heading text-4xl font-bold tracking-tight text-foreground text-balance md:text-5xl">
+        Welcome to Quick Thoughts
+      </h1>
+      <p className="mb-10 text-center text-base text-muted-foreground text-pretty">
+        Let's get you set up in just a few steps
+      </p>
+
+      {/* Info List */}
+      <div className="mb-8 w-full space-y-3 rounded-xl border border-border bg-secondary/20 p-6">
+        <div className="flex items-start gap-3 text-sm text-foreground">
+          <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-accent/20 text-xs font-bold text-accent">
+            1
+          </span>
+          <span>Record your thoughts</span>
+        </div>
+        <div className="flex items-start gap-3 text-sm text-foreground">
+          <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-accent/20 text-xs font-bold text-accent">
+            2
+          </span>
+          <span>Let us extract and organize your thoughts</span>
+        </div>
+        <div className="flex items-start gap-3 text-sm text-foreground">
+          <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-accent/20 text-xs font-bold text-accent">
+            3
+          </span>
+          <span>View your organized thoughts in your notes</span>
+        </div>
+      </div>
+
+      {/* Username Form */}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+          saveUsername()
+        }}
+        className="flex w-full flex-col gap-4"
+      >
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="username" className="text-sm text-muted-foreground">
+            Choose a username
+          </Label>
+          <Input
+            id="username"
+            type="text"
+            placeholder="e.g. mo_quickthoughts"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoComplete="nickname"
+            required
+            className="h-12 rounded-xl border-border bg-secondary/40 px-4 text-foreground placeholder:text-muted-foreground focus-visible:ring-accent"
+          />
+          <p className="text-xs text-muted-foreground">
+            Letters, numbers, and underscores only (min 3 characters)
+          </p>
+        </div>
+
+        <Button
+          type="submit"
+          disabled={loading}
+          className="group mt-2 h-12 w-full rounded-xl bg-accent text-accent-foreground font-semibold transition-all hover:bg-accent/90"
+          size="lg"
+        >
+          <span>{loading ? "Saving..." : "Continue"}</span>
+          <ArrowRight className="ml-2 size-4 transition-transform group-hover:translate-x-0.5" />
+        </Button>
+      </form>
+    </div>
+  )
 }
