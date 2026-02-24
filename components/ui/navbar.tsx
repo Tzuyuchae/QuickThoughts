@@ -66,7 +66,7 @@ export function Navbar() {
           {/* Logo */}
           <Link href="/" className="flex items-center gap-3">
             <Image
-              src="/images/logo.png"
+              src="/images/qtlogo.png"
               alt="Quick Thoughts"
               width={140}
               height={40}

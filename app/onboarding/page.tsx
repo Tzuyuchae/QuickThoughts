@@ -184,7 +184,7 @@ function OnboardingForm() {
         {/* Logo */}
         <div className="mb-10">
           <Image
-            src="/images/logo.png"
+            src="/images/qtlogo.png"
             alt="Quick Thoughts logo"
             width={220}
             height={64}
@@ -268,7 +268,7 @@ function OnboardingForm() {
       {/* Logo */}
       <div className="mb-10">
         <Image
-          src="/images/logo.png"
+          src="/images/qtlogo.png"
           alt="Quick Thoughts logo"
           width={220}
           height={64}
@@ -289,7 +289,7 @@ function OnboardingForm() {
       </div>
 
       {/* Heading */}
-      <h1 className="mb-2 text-center font-heading text-4xl font-bold tracking-tight text-foreground text-balance md:text-5xl">
+      <h1 className="mb-2 text-center font-heading text-4xl font-bold tracking-tight text-foreground text-balance md:text-5xl mb-5">
         Welcome to Quick Thoughts
       </h1>
       <p className="mb-10 text-center text-base text-muted-foreground text-pretty">

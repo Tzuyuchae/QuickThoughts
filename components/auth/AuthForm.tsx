@@ -212,7 +212,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
           {/* Logo */}
           <div className="mb-10">
             <Image
-              src="/images/logo.png"
+              src="/images/qtlogo.png"
               alt="Quick Thoughts logo"
               width={220}
               height={64}
@@ -299,7 +299,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
           {/* Logo */}
           <div className="mb-10">
             <Image
-              src="/images/logo.png"
+              src="/images/qtlogo.png"
               alt="Quick Thoughts logo"
               width={220}
               height={64}

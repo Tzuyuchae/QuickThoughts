@@ -1,6 +1,9 @@
 /**
- * Capture Page: 
+ * Capture Page:
  * Handles recording audio and uploading files to save them to the global list.
+ * Features:
+ *   - Voice-to-text only mode (uses Web Speech API, bypasses Gemini)
+ *   - Rate limiting: max 10 Gemini calls per day (resets at midnight)
  */
 
 "use client"
@@ -9,13 +12,61 @@ import { useState, useRef, useEffect } from "react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Mic, Square, Loader2, Sparkles, Calendar, Folder } from "lucide-react"
+import { Mic, Square, Loader2, Sparkles, Calendar, Folder, AlertTriangle } from "lucide-react"
 import { Navbar } from "@/components/ui/navbar"
 import { useMemos } from "@/app/context/MemoContext"
 import { createClient } from "@/lib/supabase/browser"
 import { Progress } from "@/components/ui/progress"
 import { DotGridBackground } from "@/components/ui/dot-grid-background"
+import { Switch } from "@/components/ui/switch"
+import { Label } from "@/components/ui/label"
 
+// ---------------------------------------------------------------------------
+// Rate-limit helpers (localStorage, resets daily)
+// ---------------------------------------------------------------------------
+const RATE_LIMIT_KEY = "gemini_rate_limit"
+const DAILY_LIMIT = 10
+
+interface RateLimitRecord {
+  date: string // "YYYY-MM-DD"
+  count: number
+}
+
+function getTodayString(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function getRateLimitRecord(): RateLimitRecord {
+  try {
+    const raw = localStorage.getItem(RATE_LIMIT_KEY)
+    if (raw) {
+      const parsed: RateLimitRecord = JSON.parse(raw)
+      if (parsed.date === getTodayString()) return parsed
+    }
+  } catch {
+    // ignore
+  }
+  return { date: getTodayString(), count: 0 }
+}
+
+function incrementRateLimit(): RateLimitRecord {
+  const record = getRateLimitRecord()
+  const updated = { date: getTodayString(), count: record.count + 1 }
+  try {
+    localStorage.setItem(RATE_LIMIT_KEY, JSON.stringify(updated))
+  } catch {
+    // ignore
+  }
+  return updated
+}
+
+function isRateLimited(): boolean {
+  return getRateLimitRecord().count >= DAILY_LIMIT
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 export default function HomePage() {
   const { memos, addMemo } = useMemos()
 
@@ -23,6 +74,12 @@ export default function HomePage() {
   const [recordingTime, setRecordingTime] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
+
+  // Voice-to-text only mode
+  const [voiceOnlyMode, setVoiceOnlyMode] = useState(false)
+
+  // Rate limit state (refreshed on mount + after each call)
+  const [rateLimitCount, setRateLimitCount] = useState(0)
 
   const supabase = createClient()
   const [username, setUsername] = useState<string | null>(null)
@@ -32,8 +89,12 @@ export default function HomePage() {
   const audioChunksRef = useRef<BlobPart[]>([])
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null)
   const recordingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const recognitionRef = useRef<any>(null)
 
   useEffect(() => {
+    // Sync rate limit count from localStorage
+    setRateLimitCount(getRateLimitRecord().count)
+
     let mounted = true
 
     ;(async () => {
@@ -68,11 +129,24 @@ export default function HomePage() {
       }
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
       if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop() } catch { /* ignore */ }
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // ---------------------------------------------------------------------------
+  // Gemini processing (with rate-limit guard)
+  // ---------------------------------------------------------------------------
   const processAudioWithGemini = async (audioBlob: Blob, fileName?: string) => {
+    if (isRateLimited()) {
+      setError(
+        `Daily AI limit of ${DAILY_LIMIT} uses reached. Switch to Voice-to-Text Only mode or try again tomorrow.`
+      )
+      return
+    }
+
     setIsProcessing(true)
     setError(null)
 
@@ -89,6 +163,10 @@ export default function HomePage() {
         const errorData = await response.json()
         throw new Error(errorData.error || "Failed to process audio")
       }
+
+      // Count this successful call
+      const updated = incrementRateLimit()
+      setRateLimitCount(updated.count)
 
       const data = await response.json()
 
@@ -144,9 +222,89 @@ export default function HomePage() {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Recording controls
+  // ---------------------------------------------------------------------------
   const startRecording = async () => {
     try {
       setError(null)
+
+      if (voiceOnlyMode) {
+        const SpeechRecognition =
+          (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+
+        if (!SpeechRecognition) {
+          setError("Web Speech API is not supported in this browser.")
+          return
+        }
+
+        const recognition = new SpeechRecognition()
+        recognitionRef.current = recognition
+        recognition.lang = "en-US"
+        recognition.interimResults = false
+        recognition.maxAlternatives = 1
+        recognition.continuous = true
+
+        let transcript = ""
+
+        recognition.onresult = (event: any) => {
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            if (event.results[i].isFinal) {
+              transcript += event.results[i][0].transcript + " "
+            }
+          }
+        }
+
+        recognition.onerror = (event: any) => {
+          setError(event.error || "Speech recognition error")
+          setRecording(false)
+          setRecordingTime(0)
+          if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
+          if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
+        }
+
+        recognition.onend = () => {
+          if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
+          if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
+
+          const finalText = transcript.trim()
+          const dateLabel = new Date().toLocaleDateString("en-US", {
+            month: "short",
+            day: "numeric",
+          })
+
+          if (finalText) {
+            addMemo({
+              id: `${Date.now()}`,
+              title: `Voice Memo ${memos.length + 1}`,
+              status: "ready",
+              date: dateLabel,
+              category: "Unsorted",
+              transcription: finalText,
+            })
+          } else {
+            setError("No speech detected. Please try again.")
+          }
+
+          setRecording(false)
+          setRecordingTime(0)
+        }
+
+        recognition.start()
+        setRecording(true)
+        recordingTimerRef.current = setInterval(() => setRecordingTime((prev) => prev + 1), 1000)
+        recordingTimeoutRef.current = setTimeout(() => stopRecording(), 120000)
+        return
+      }
+
+      // Normal AI mode: check rate limit before starting
+      if (isRateLimited()) {
+        setError(
+          `Daily AI limit of ${DAILY_LIMIT} uses reached. Switch to Voice-to-Text Only mode or try again tomorrow.`
+        )
+        return
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const mediaRecorder = new MediaRecorder(stream, {
         mimeType: "audio/webm",
@@ -184,8 +342,14 @@ export default function HomePage() {
   }
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current?.state === "recording") {
-      mediaRecorderRef.current.stop()
+    if (voiceOnlyMode) {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop() } catch { /* ignore */ }
+      }
+    } else {
+      if (mediaRecorderRef.current?.state === "recording") {
+        mediaRecorderRef.current.stop()
+      }
     }
     if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
     if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
@@ -198,6 +362,8 @@ export default function HomePage() {
   }
 
   const progress = (recordingTime / 120) * 100
+  const rateLimitExceeded = rateLimitCount >= DAILY_LIMIT
+  const rateLimitProgress = Math.min((rateLimitCount / DAILY_LIMIT) * 100, 100)
 
   return (
     <div className="relative min-h-screen bg-background">
@@ -232,21 +398,98 @@ export default function HomePage() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
-                {/* Recording info */}
+
+                {/* Voice-only mode toggle */}
                 <div className="rounded-lg border border-border bg-muted/50 p-4">
-                  <div className="flex items-start gap-3">
-                    <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent/20">
-                      <Sparkles className="size-4 text-accent" />
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-start gap-3 flex-1">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent/20">
+                        <Mic className="size-4 text-accent" />
+                      </div>
+                      <div className="flex-1 text-sm">
+                        <Label
+                          htmlFor="voice-only-toggle"
+                          className="font-medium text-foreground mb-0.5 block cursor-pointer"
+                        >
+                          Voice-to-Text Only
+                        </Label>
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                          Bypass AI — transcribe with your browser. No API usage.
+                        </p>
+                      </div>
                     </div>
-                    <div className="flex-1 text-sm text-muted-foreground">
-                      <p className="font-medium text-foreground mb-1">AI-Powered Organization</p>
-                      <p className="text-xs leading-relaxed">
-                        Your memo will be automatically split into thoughts and sorted into your
-                        existing folders using AI.
-                      </p>
-                    </div>
+                    <Switch
+                      id="voice-only-toggle"
+                      checked={voiceOnlyMode}
+                      onCheckedChange={(val) => {
+                        setVoiceOnlyMode(val)
+                        setError(null)
+                      }}
+                      disabled={recording}
+                      className="ring-2 ring-orange-500 ring-offset-2 ring-offset-background transition-all [&>span]:bg-orange-500"
+                    />
                   </div>
                 </div>
+
+                {/* Rate limit indicator (only shown in AI mode) */}
+                {!voiceOnlyMode && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span className="flex items-center gap-1.5">
+                        <Sparkles className="size-3 text-accent" />
+                        Daily AI uses
+                      </span>
+                      <span className={rateLimitExceeded ? "text-destructive font-semibold" : ""}>
+                        {rateLimitCount} / {DAILY_LIMIT}
+                      </span>
+                    </div>
+                    <Progress
+                      value={rateLimitProgress}
+                      className={`h-1.5 ${rateLimitExceeded ? "[&>div]:bg-destructive" : ""}`}
+                    />
+                    {rateLimitExceeded && (
+                      <p className="text-xs text-destructive flex items-center gap-1.5">
+                        <AlertTriangle className="size-3" />
+                        Daily limit reached. Enable Voice-to-Text Only or wait until tomorrow.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Recording info */}
+                {!voiceOnlyMode && (
+                  <div className="rounded-lg border border-border bg-muted/50 p-4">
+                    <div className="flex items-start gap-3">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent/20">
+                        <Sparkles className="size-4 text-accent" />
+                      </div>
+                      <div className="flex-1 text-sm text-muted-foreground">
+                        <p className="font-medium text-foreground mb-1">AI-Powered Organization</p>
+                        <p className="text-xs leading-relaxed">
+                          Your memo will be automatically split into thoughts and sorted into your
+                          existing folders using AI.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {voiceOnlyMode && (
+                  <div className="rounded-lg border border-border bg-muted/50 p-4">
+                    <div className="flex items-start gap-3">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent/20">
+                        <Mic className="size-4 text-accent" />
+                      </div>
+                      <div className="flex-1 text-sm text-muted-foreground">
+                        <p className="font-medium text-foreground mb-1">Browser Transcription</p>
+                        <p className="text-xs leading-relaxed">
+                          Your speech will be transcribed directly and saved as a single memo in{" "}
+                          <strong>Unsorted</strong>. No AI organization.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Recording controls */}
                 {recording && (
@@ -267,7 +510,7 @@ export default function HomePage() {
                     className="w-full h-16 rounded-xl text-base font-semibold"
                     onClick={recording ? stopRecording : startRecording}
                     variant={recording ? "destructive" : "default"}
-                    disabled={isProcessing}
+                    disabled={isProcessing || (!voiceOnlyMode && rateLimitExceeded && !recording)}
                     size="lg"
                   >
                     {recording ? (
@@ -287,7 +530,9 @@ export default function HomePage() {
                 {isProcessing && (
                   <div className="flex items-center justify-center gap-3 rounded-lg border border-border bg-accent/10 p-4 text-sm text-accent">
                     <Loader2 className="h-5 w-5 animate-spin" />
-                    <span className="font-medium">Processing with AI...</span>
+                    <span className="font-medium">
+                      {voiceOnlyMode ? "Saving transcript..." : "Processing with AI..."}
+                    </span>
                   </div>
                 )}
 
