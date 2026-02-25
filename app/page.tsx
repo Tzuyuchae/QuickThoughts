@@ -5,11 +5,16 @@
  *   - Voice-to-text only mode (uses Web Speech API, bypasses Gemini)
  *   - Rate limiting: max 10 Gemini calls per day (resets at midnight)
  *   - Post-recording folder selection + memo title naming with confirmation
- *   - Mobile: no getUserMedia permission priming — goes straight to
- *     recognition.start(). Priming was causing its own mic-conflict errors
- *     on Android Chrome when mic permission is already granted.
- *   - Auto single-retry on transient service-not-allowed errors.
- *   - Safari iOS: detected early with a clear unsupported message.
+ *
+ * Mobile fix for Voice-to-Text Only mode:
+ *   continuous=true  → holds a persistent connection to Google's speech servers
+ *                       → Android Chrome's background service restrictions kill it
+ *                       → results in "service-not-allowed"
+ *   continuous=false → makes short one-shot requests per utterance
+ *                       → we auto-restart in onend while user is still recording
+ *                       → avoids the persistent connection that gets blocked
+ *   no-speech error  → benign with continuous=false (quiet moment) — just restart
+ *   transcript       → stored in a ref so rapid restarts never lose accumulated text
  */
 
 "use client"
@@ -89,41 +94,6 @@ function isRateLimited(): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: detect Safari on iOS (Web Speech API not supported there)
-// ---------------------------------------------------------------------------
-function isSafariIOS(): boolean {
-  if (typeof navigator === "undefined") return false
-  const ua = navigator.userAgent
-  return (
-    /iP(hone|od|ad)/.test(ua) &&
-    /WebKit/.test(ua) &&
-    !/CriOS/.test(ua) &&
-    !/FxiOS/.test(ua)
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Helper: human-readable SpeechRecognition error messages
-// ---------------------------------------------------------------------------
-function speechErrorMessage(code: string): string {
-  switch (code) {
-    case "service-not-allowed":
-    case "not-allowed":
-      return "Speech recognition was blocked. Please ensure microphone permission is allowed for this site in your browser settings, then try again."
-    case "no-speech":
-      return "No speech detected. Please try again."
-    case "network":
-      return "A network error occurred with the speech service. Please check your connection and try again."
-    case "aborted":
-      return "Recording was cancelled."
-    case "audio-capture":
-      return "No microphone was found. Please check your device settings."
-    default:
-      return `Speech recognition error (${code}). Please try again.`
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 export default function HomePage() {
@@ -155,8 +125,9 @@ export default function HomePage() {
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null)
   const recordingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const recognitionRef = useRef<any>(null)
-  // Tracks whether we've already attempted one auto-retry for service-not-allowed
-  const speechRetryAttempted = useRef(false)
+  // Used inside SpeechRecognition callbacks — refs prevent stale closure issues
+  const isRecordingActiveRef = useRef(false)  // true while user hasn't pressed Stop
+  const transcriptRef = useRef("")            // accumulates text across all restarts
 
   useEffect(() => {
     setRateLimitCount(getRateLimitRecord().count)
@@ -181,7 +152,7 @@ export default function HomePage() {
         if (!mounted) return
 
         setUsername(profile?.username ?? null)
-        // Filter out any folder literally named "Unsorted" (case-insensitive) to prevent duplicates
+        // Filter out any folder literally named "Unsorted" to prevent duplicates
         const nextFolders = ((folderRows ?? []) as Array<{ id: string; name: string }>).filter(
           (f) => f.name.toLowerCase() !== "unsorted"
         )
@@ -193,6 +164,7 @@ export default function HomePage() {
 
     return () => {
       mounted = false
+      isRecordingActiveRef.current = false
       if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop()
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
       if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
@@ -204,73 +176,82 @@ export default function HomePage() {
   }, [])
 
   // ---------------------------------------------------------------------------
-  // Core: start a SpeechRecognition session
-  // Called initially and once on auto-retry.
-  // No getUserMedia here — mic permission is already granted (AI mode proves
-  // this), and opening a competing stream causes its own errors on Android.
+  // Create and attach a fresh SpeechRecognition instance.
+  // Called once on start, then again on each auto-restart.
+  //
+  // Why continuous=false + restart instead of continuous=true:
+  //   continuous=true holds a persistent socket to Google's speech servers.
+  //   Android Chrome's battery/service manager kills persistent connections,
+  //   producing "service-not-allowed". continuous=false makes one-shot requests
+  //   per utterance — each is its own short request, nothing to kill.
   // ---------------------------------------------------------------------------
-  const startSpeechRecognition = (transcriptAccumulator: { value: string }) => {
+  const attachRecognition = () => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
 
     const recognition = new SpeechRecognition()
     recognitionRef.current = recognition
+
     recognition.lang = "en-US"
+    recognition.continuous = false       // ← KEY: one-shot per utterance
     recognition.interimResults = false
     recognition.maxAlternatives = 1
-    recognition.continuous = true
 
     recognition.onresult = (event: any) => {
       for (let i = event.resultIndex; i < event.results.length; i++) {
         if (event.results[i].isFinal) {
-          transcriptAccumulator.value += event.results[i][0].transcript + " "
+          transcriptRef.current += event.results[i][0].transcript + " "
         }
       }
     }
 
     recognition.onerror = (event: any) => {
-      // Auto-retry once on service-not-allowed — this fires transiently on
-      // Android Chrome's first attempt while the speech service warms up.
-      if (event.error === "service-not-allowed" && !speechRetryAttempted.current) {
-        speechRetryAttempted.current = true
-        try { recognition.stop() } catch { /* ignore */ }
-        setTimeout(() => {
-          try {
-            startSpeechRecognition(transcriptAccumulator)
-          } catch {
-            setError(speechErrorMessage("service-not-allowed"))
-            setRecording(false)
-            setRecordingTime(0)
-            if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
-            if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
-          }
-        }, 500)
+      // no-speech is benign with continuous=false — it means a quiet moment.
+      // Restart silently and keep listening.
+      if (event.error === "no-speech") {
+        if (isRecordingActiveRef.current) {
+          try { attachRecognition() } catch { /* ignore */ }
+        }
         return
       }
 
+      // All other errors are fatal
+      isRecordingActiveRef.current = false
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
       if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
-      setError(speechErrorMessage(event.error))
+
+      const messages: Record<string, string> = {
+        "service-not-allowed": "Speech recognition is not available in this browser. Try updating Chrome or using a different browser.",
+        "not-allowed":         "Microphone access was denied. Please allow microphone permission and try again.",
+        "network":             "Network error with speech service. Please check your connection.",
+        "audio-capture":       "No microphone found. Please check your device.",
+        "aborted":             "Recording was cancelled.",
+      }
+      setError(messages[event.error] ?? `Speech error: ${event.error}. Please try again.`)
       setRecording(false)
       setRecordingTime(0)
     }
 
     recognition.onend = () => {
+      // With continuous=false, onend fires after every utterance.
+      // If user is still recording, restart immediately to keep listening.
+      if (isRecordingActiveRef.current) {
+        try { attachRecognition() } catch { /* ignore */ }
+        return
+      }
+
+      // User pressed Stop — finalize
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
       if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
 
-      const finalText = transcriptAccumulator.value.trim()
-
+      const finalText = transcriptRef.current.trim()
       if (finalText) {
         setPendingTranscript(finalText)
-        setRecording(false)
-        setRecordingTime(0)
-      } else if (!speechRetryAttempted.current || recognitionRef.current === recognition) {
-        // Only show "no speech" if we're not mid-retry
+      } else {
         setError("No speech detected. Please try again.")
-        setRecording(false)
-        setRecordingTime(0)
       }
+      setRecording(false)
+      setRecordingTime(0)
     }
 
     recognition.start()
@@ -397,38 +378,28 @@ export default function HomePage() {
       setPendingTranscript(null)
       setMemoTitle("")
       setConfirmed(false)
-      speechRetryAttempted.current = false
 
       if (voiceOnlyMode) {
-        // Safari iOS: Web Speech API not supported
-        if (isSafariIOS()) {
-          setError(
-            "Voice-to-Text is not supported in Safari on iOS. Please use Chrome on Android, or switch to AI mode instead."
-          )
-          return
-        }
-
         const SpeechRecognition =
           (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
 
         if (!SpeechRecognition) {
-          setError(
-            "Your browser doesn't support Voice-to-Text. Try Chrome on Android or desktop, or use AI mode instead."
-          )
+          setError("Voice-to-Text is not supported in this browser. Try Chrome on desktop or Android, or use AI mode instead.")
           return
         }
 
-        const transcriptAccumulator = { value: "" }
+        // Reset accumulator and active flag for a fresh session
+        transcriptRef.current = ""
+        isRecordingActiveRef.current = true
 
         setRecording(true)
         recordingTimerRef.current = setInterval(() => setRecordingTime((prev) => prev + 1), 1000)
         recordingTimeoutRef.current = setTimeout(() => stopRecording(), 120000)
 
-        startSpeechRecognition(transcriptAccumulator)
+        attachRecognition()
         return
       }
 
-      // Normal AI mode
       if (isRateLimited()) {
         setError(`Daily AI limit of ${DAILY_LIMIT} uses reached. Switch to Voice-to-Text Only mode or try again tomorrow.`)
         return
@@ -466,6 +437,8 @@ export default function HomePage() {
 
   const stopRecording = () => {
     if (voiceOnlyMode) {
+      // Signal to onend that the user stopped — prevents further auto-restarts
+      isRecordingActiveRef.current = false
       if (recognitionRef.current) {
         try { recognitionRef.current.stop() } catch { /* ignore */ }
       }
@@ -495,6 +468,7 @@ export default function HomePage() {
       <DotGridBackground />
       <Navbar />
       <main className="relative z-10 container mx-auto px-4 py-8">
+        {/* Welcome Message */}
         {username && (
           <div className="mb-8">
             <h1 className="text-4xl font-bold tracking-tight text-foreground mb-2">
@@ -584,7 +558,7 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {/* Info banners */}
+                {/* Info banners — hidden while confirmation is active */}
                 {showRecordButton && !voiceOnlyMode && (
                   <div className="rounded-lg border border-border bg-muted/50 p-4">
                     <div className="flex items-start gap-3">
@@ -632,9 +606,10 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {/* Post-recording confirmation panel */}
+                {/* ── Post-recording confirmation panel ── */}
                 {pendingTranscript && !confirmed && (
                   <div className="rounded-xl border-2 border-accent/30 bg-gradient-to-b from-accent/5 to-transparent overflow-hidden">
+                    {/* Header */}
                     <div className="flex items-center gap-2 px-4 pt-4 pb-3 border-b border-accent/15">
                       <div className="flex size-6 items-center justify-center rounded-full bg-accent/20">
                         <CheckCircle2 className="size-3.5 text-accent" />
@@ -643,6 +618,7 @@ export default function HomePage() {
                     </div>
 
                     <div className="p-4 space-y-4">
+                      {/* Transcript preview */}
                       <div className="rounded-lg bg-muted/60 border border-border px-3 py-2.5">
                         <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide mb-1">
                           Transcript
@@ -652,6 +628,7 @@ export default function HomePage() {
                         </p>
                       </div>
 
+                      {/* Memo title input */}
                       <div className="space-y-1.5">
                         <Label className="text-xs font-medium text-foreground flex items-center gap-1.5">
                           <PenLine className="size-3 text-accent" />
@@ -669,6 +646,7 @@ export default function HomePage() {
                         </p>
                       </div>
 
+                      {/* Folder selector */}
                       <div className="space-y-1.5">
                         <Label className="text-xs font-medium text-foreground flex items-center gap-1.5">
                           <Folder className="size-3 text-accent" />
@@ -679,12 +657,14 @@ export default function HomePage() {
                             <SelectValue placeholder="Select a folder" />
                           </SelectTrigger>
                           <SelectContent>
+                            {/* Hardcoded Unsorted always first */}
                             <SelectItem value="Unsorted">
                               <span className="flex items-center gap-2">
                                 <Folder className="size-3.5 text-muted-foreground" />
                                 Unsorted
                               </span>
                             </SelectItem>
+                            {/* User folders — already filtered to exclude "Unsorted" */}
                             {folders.map((f) => (
                               <SelectItem key={f.id} value={f.name}>
                                 <span className="flex items-center gap-2">
@@ -697,11 +677,19 @@ export default function HomePage() {
                         </Select>
                       </div>
 
+                      {/* Actions */}
                       <div className="flex gap-2 pt-1">
-                        <Button className="flex-1 h-9 text-sm font-semibold" onClick={confirmAndSaveMemo}>
+                        <Button
+                          className="flex-1 h-9 text-sm font-semibold"
+                          onClick={confirmAndSaveMemo}
+                        >
                           Save memo
                         </Button>
-                        <Button variant="outline" className="h-9 px-4 text-sm" onClick={discardPendingMemo}>
+                        <Button
+                          variant="outline"
+                          className="h-9 px-4 text-sm"
+                          onClick={discardPendingMemo}
+                        >
                           Discard
                         </Button>
                       </div>
@@ -752,7 +740,9 @@ export default function HomePage() {
                 {isProcessing && (
                   <div className="flex items-center justify-center gap-3 rounded-lg border border-border bg-accent/10 p-4 text-sm text-accent">
                     <Loader2 className="h-5 w-5 animate-spin" />
-                    <span className="font-medium">Processing with AI...</span>
+                    <span className="font-medium">
+                      {voiceOnlyMode ? "Saving transcript..." : "Processing with AI..."}
+                    </span>
                   </div>
                 )}
 
