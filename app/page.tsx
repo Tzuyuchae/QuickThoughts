@@ -5,10 +5,10 @@
  *   - Voice-to-text only mode (uses Web Speech API, bypasses Gemini)
  *   - Rate limiting: max 10 Gemini calls per day (resets at midnight)
  *   - Post-recording folder selection + memo title naming with confirmation
- *   - Mobile fix: getUserMedia stream is fully stopped before SpeechRecognition
- *     starts, so the two don't compete for the mic on Android Chrome.
- *   - Mobile fix: automatic single retry on service-not-allowed (transient
- *     Google speech-server connection issue on first attempt).
+ *   - Mobile: no getUserMedia permission priming — goes straight to
+ *     recognition.start(). Priming was causing its own mic-conflict errors
+ *     on Android Chrome when mic permission is already granted.
+ *   - Auto single-retry on transient service-not-allowed errors.
  *   - Safari iOS: detected early with a clear unsupported message.
  */
 
@@ -109,7 +109,7 @@ function speechErrorMessage(code: string): string {
   switch (code) {
     case "service-not-allowed":
     case "not-allowed":
-      return "Microphone access was denied. Please allow microphone permission in your browser settings and try again."
+      return "Speech recognition was blocked. Please ensure microphone permission is allowed for this site in your browser settings, then try again."
     case "no-speech":
       return "No speech detected. Please try again."
     case "network":
@@ -119,7 +119,7 @@ function speechErrorMessage(code: string): string {
     case "audio-capture":
       return "No microphone was found. Please check your device settings."
     default:
-      return `Speech recognition error: ${code}. Please try again.`
+      return `Speech recognition error (${code}). Please try again.`
   }
 }
 
@@ -206,6 +206,8 @@ export default function HomePage() {
   // ---------------------------------------------------------------------------
   // Core: start a SpeechRecognition session
   // Called initially and once on auto-retry.
+  // No getUserMedia here — mic permission is already granted (AI mode proves
+  // this), and opening a competing stream causes its own errors on Android.
   // ---------------------------------------------------------------------------
   const startSpeechRecognition = (transcriptAccumulator: { value: string }) => {
     const SpeechRecognition =
@@ -227,10 +229,8 @@ export default function HomePage() {
     }
 
     recognition.onerror = (event: any) => {
-      // ── Auto-retry once on service-not-allowed ───────────────────────────
-      // On Android Chrome this error fires transiently on the first attempt
-      // while the browser establishes its connection to Google's speech servers.
-      // Waiting 300 ms then retrying resolves it in the vast majority of cases.
+      // Auto-retry once on service-not-allowed — this fires transiently on
+      // Android Chrome's first attempt while the speech service warms up.
       if (event.error === "service-not-allowed" && !speechRetryAttempted.current) {
         speechRetryAttempted.current = true
         try { recognition.stop() } catch { /* ignore */ }
@@ -244,7 +244,7 @@ export default function HomePage() {
             if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
             if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
           }
-        }, 300)
+        }, 500)
         return
       }
 
@@ -263,15 +263,14 @@ export default function HomePage() {
 
       if (finalText) {
         setPendingTranscript(finalText)
-      } else {
+        setRecording(false)
+        setRecordingTime(0)
+      } else if (!speechRetryAttempted.current || recognitionRef.current === recognition) {
         // Only show "no speech" if we're not mid-retry
-        if (!speechRetryAttempted.current || recognitionRef.current === recognition) {
-          setError("No speech detected. Please try again.")
-        }
+        setError("No speech detected. Please try again.")
+        setRecording(false)
+        setRecordingTime(0)
       }
-
-      setRecording(false)
-      setRecordingTime(0)
     }
 
     recognition.start()
@@ -401,7 +400,7 @@ export default function HomePage() {
       speechRetryAttempted.current = false
 
       if (voiceOnlyMode) {
-        // ── Safari iOS: Web Speech API not supported ─────────────────────
+        // Safari iOS: Web Speech API not supported
         if (isSafariIOS()) {
           setError(
             "Voice-to-Text is not supported in Safari on iOS. Please use Chrome on Android, or switch to AI mode instead."
@@ -419,21 +418,6 @@ export default function HomePage() {
           return
         }
 
-        // ── Mobile fix: prime mic permission, then FULLY STOP the stream ──
-        // We must close the getUserMedia stream before calling recognition.start().
-        // On Android Chrome, having an open MediaStream while starting
-        // SpeechRecognition causes both to compete for the mic, which triggers
-        // service-not-allowed. We only need getUserMedia here to ensure the
-        // browser has shown the permission prompt — then we immediately close it.
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-          stream.getTracks().forEach((t) => t.stop()) // release immediately
-        } catch {
-          setError("Microphone access was denied. Please allow microphone permission and try again.")
-          return
-        }
-
-        // Shared accumulator object passed by reference so the retry reuses it
         const transcriptAccumulator = { value: "" }
 
         setRecording(true)
@@ -444,7 +428,7 @@ export default function HomePage() {
         return
       }
 
-      // ── Normal AI mode ───────────────────────────────────────────────────
+      // Normal AI mode
       if (isRateLimited()) {
         setError(`Daily AI limit of ${DAILY_LIMIT} uses reached. Switch to Voice-to-Text Only mode or try again tomorrow.`)
         return
@@ -511,7 +495,6 @@ export default function HomePage() {
       <DotGridBackground />
       <Navbar />
       <main className="relative z-10 container mx-auto px-4 py-8">
-        {/* Welcome Message */}
         {username && (
           <div className="mb-8">
             <h1 className="text-4xl font-bold tracking-tight text-foreground mb-2">
