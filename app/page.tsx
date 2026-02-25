@@ -4,6 +4,7 @@
  * Features:
  *   - Voice-to-text only mode (uses Web Speech API, bypasses Gemini)
  *   - Rate limiting: max 10 Gemini calls per day (resets at midnight)
+ *   - Post-recording folder selection + memo title naming with confirmation
  */
 
 "use client"
@@ -12,7 +13,18 @@ import { useState, useRef, useEffect } from "react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Mic, Square, Loader2, Sparkles, Calendar, Folder, AlertTriangle } from "lucide-react"
+import { Input } from "@/components/ui/input"
+import {
+  Mic,
+  Square,
+  Loader2,
+  Sparkles,
+  Calendar,
+  Folder,
+  AlertTriangle,
+  CheckCircle2,
+  PenLine,
+} from "lucide-react"
 import { Navbar } from "@/components/ui/navbar"
 import { useMemos } from "@/app/context/MemoContext"
 import { createClient } from "@/lib/supabase/browser"
@@ -20,6 +32,13 @@ import { Progress } from "@/components/ui/progress"
 import { DotGridBackground } from "@/components/ui/dot-grid-background"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 
 // ---------------------------------------------------------------------------
 // Rate-limit helpers (localStorage, resets daily)
@@ -78,7 +97,13 @@ export default function HomePage() {
   // Voice-to-text only mode
   const [voiceOnlyMode, setVoiceOnlyMode] = useState(false)
 
-  // Rate limit state (refreshed on mount + after each call)
+  // Post-recording confirmation state (voice-only)
+  const [pendingTranscript, setPendingTranscript] = useState<string | null>(null)
+  const [selectedFolder, setSelectedFolder] = useState<string>("Unsorted")
+  const [memoTitle, setMemoTitle] = useState<string>("")
+  const [confirmed, setConfirmed] = useState(false)
+
+  // Rate limit state
   const [rateLimitCount, setRateLimitCount] = useState(0)
 
   const supabase = createClient()
@@ -92,7 +117,6 @@ export default function HomePage() {
   const recognitionRef = useRef<any>(null)
 
   useEffect(() => {
-    // Sync rate limit count from localStorage
     setRateLimitCount(getRateLimitRecord().count)
 
     let mounted = true
@@ -115,18 +139,19 @@ export default function HomePage() {
         if (!mounted) return
 
         setUsername(profile?.username ?? null)
-        const nextFolders = (folderRows ?? []) as Array<{ id: string; name: string }>
+        // Filter out any folder literally named "Unsorted" to prevent duplicates
+        const nextFolders = ((folderRows ?? []) as Array<{ id: string; name: string }>).filter(
+          (f) => f.name.toLowerCase() !== "unsorted"
+        )
         setFolders(nextFolders)
       } catch {
-        // ignore; page can still render
+        // ignore
       }
     })()
 
     return () => {
       mounted = false
-      if (mediaRecorderRef.current?.state === "recording") {
-        mediaRecorderRef.current.stop()
-      }
+      if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop()
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
       if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
       if (recognitionRef.current) {
@@ -137,13 +162,50 @@ export default function HomePage() {
   }, [])
 
   // ---------------------------------------------------------------------------
-  // Gemini processing (with rate-limit guard)
+  // Confirm and save pending voice-only memo
+  // ---------------------------------------------------------------------------
+  const confirmAndSaveMemo = () => {
+    if (!pendingTranscript) return
+
+    const dateLabel = new Date().toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+    })
+
+    const finalTitle = memoTitle.trim() || `Voice Memo ${memos.length + 1}`
+
+    addMemo({
+      id: `${Date.now()}`,
+      title: finalTitle,
+      status: "ready",
+      date: dateLabel,
+      category: selectedFolder,
+      transcription: pendingTranscript,
+    })
+
+    setConfirmed(true)
+
+    setTimeout(() => {
+      setPendingTranscript(null)
+      setSelectedFolder("Unsorted")
+      setMemoTitle("")
+      setConfirmed(false)
+    }, 2200)
+  }
+
+  const discardPendingMemo = () => {
+    setPendingTranscript(null)
+    setSelectedFolder("Unsorted")
+    setMemoTitle("")
+    setConfirmed(false)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Gemini processing
   // ---------------------------------------------------------------------------
   const processAudioWithGemini = async (audioBlob: Blob, fileName?: string) => {
     if (isRateLimited()) {
-      setError(
-        `Daily AI limit of ${DAILY_LIMIT} uses reached. Switch to Voice-to-Text Only mode or try again tomorrow.`
-      )
+      setError(`Daily AI limit of ${DAILY_LIMIT} uses reached. Switch to Voice-to-Text Only mode or try again tomorrow.`)
       return
     }
 
@@ -154,30 +216,21 @@ export default function HomePage() {
     formData.append("audio", audioBlob, fileName || "recording.webm")
 
     try {
-      const response = await fetch("/api/gemini", {
-        method: "POST",
-        body: formData,
-      })
+      const response = await fetch("/api/gemini", { method: "POST", body: formData })
 
       if (!response.ok) {
         const errorData = await response.json()
         throw new Error(errorData.error || "Failed to process audio")
       }
 
-      // Count this successful call
       const updated = incrementRateLimit()
       setRateLimitCount(updated.count)
 
       const data = await response.json()
 
-      const dateLabel = new Date().toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-      })
+      const dateLabel = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })
 
-      const thoughts: Array<{ text: string; label?: string; folder?: string }> = Array.isArray(
-        data?.thoughts
-      )
+      const thoughts: Array<{ text: string; label?: string; folder?: string }> = Array.isArray(data?.thoughts)
         ? data.thoughts
         : []
 
@@ -190,7 +243,6 @@ export default function HomePage() {
         .filter((t) => t.text.length > 0)
         .slice(0, 10)
 
-      // If no thoughts returned, fall back to a single memo using the full transcription
       if (safeThoughts.length === 0) {
         addMemo({
           id: `${Date.now()}`,
@@ -203,7 +255,6 @@ export default function HomePage() {
         return
       }
 
-      // Create a memo per extracted thought, categorized by the folder name returned by the API.
       safeThoughts.forEach((t, idx) => {
         addMemo({
           id: `${Date.now()}-${idx}`,
@@ -228,6 +279,9 @@ export default function HomePage() {
   const startRecording = async () => {
     try {
       setError(null)
+      setPendingTranscript(null)
+      setMemoTitle("")
+      setConfirmed(false)
 
       if (voiceOnlyMode) {
         const SpeechRecognition =
@@ -268,20 +322,9 @@ export default function HomePage() {
           if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
 
           const finalText = transcript.trim()
-          const dateLabel = new Date().toLocaleDateString("en-US", {
-            month: "short",
-            day: "numeric",
-          })
 
           if (finalText) {
-            addMemo({
-              id: `${Date.now()}`,
-              title: `Voice Memo ${memos.length + 1}`,
-              status: "ready",
-              date: dateLabel,
-              category: "Unsorted",
-              transcription: finalText,
-            })
+            setPendingTranscript(finalText)
           } else {
             setError("No speech detected. Please try again.")
           }
@@ -297,18 +340,13 @@ export default function HomePage() {
         return
       }
 
-      // Normal AI mode: check rate limit before starting
       if (isRateLimited()) {
-        setError(
-          `Daily AI limit of ${DAILY_LIMIT} uses reached. Switch to Voice-to-Text Only mode or try again tomorrow.`
-        )
+        setError(`Daily AI limit of ${DAILY_LIMIT} uses reached. Switch to Voice-to-Text Only mode or try again tomorrow.`)
         return
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: "audio/webm",
-      })
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" })
 
       mediaRecorderRef.current = mediaRecorder
       audioChunksRef.current = []
@@ -320,10 +358,7 @@ export default function HomePage() {
       mediaRecorder.onstop = async () => {
         stream.getTracks().forEach((track) => track.stop())
         const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" })
-
-        // Process with Gemini
         await processAudioWithGemini(audioBlob)
-
         setRecording(false)
         setRecordingTime(0)
       }
@@ -331,7 +366,6 @@ export default function HomePage() {
       mediaRecorder.start()
       setRecording(true)
       recordingTimerRef.current = setInterval(() => setRecordingTime((prev) => prev + 1), 1000)
-
       recordingTimeoutRef.current = setTimeout(() => {
         if (mediaRecorder.state === "recording") stopRecording()
       }, 120000)
@@ -365,6 +399,8 @@ export default function HomePage() {
   const rateLimitExceeded = rateLimitCount >= DAILY_LIMIT
   const rateLimitProgress = Math.min((rateLimitCount / DAILY_LIMIT) * 100, 100)
 
+  const showRecordButton = !pendingTranscript && !confirmed
+
   return (
     <div className="relative min-h-screen bg-background">
       <DotGridBackground />
@@ -383,7 +419,7 @@ export default function HomePage() {
         )}
 
         <div className="grid gap-8 lg:grid-cols-[400px_1fr]">
-          {/* Recording Card - Left Side */}
+          {/* Recording Card */}
           <div className="w-full">
             <Card className="border-2 border-border bg-secondary/20">
               <CardHeader>
@@ -397,9 +433,9 @@ export default function HomePage() {
                   Record up to 2 minutes. AI will transcribe and organize automatically.
                 </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-6">
 
-                {/* Voice-only mode toggle */}
+              <CardContent className="space-y-5">
+                {/* Voice-only toggle */}
                 <div className="rounded-lg border border-border bg-muted/50 p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-start gap-3 flex-1">
@@ -424,6 +460,10 @@ export default function HomePage() {
                       onCheckedChange={(val) => {
                         setVoiceOnlyMode(val)
                         setError(null)
+                        setPendingTranscript(null)
+                        setSelectedFolder("Unsorted")
+                        setMemoTitle("")
+                        setConfirmed(false)
                       }}
                       disabled={recording}
                       className="ring-2 ring-orange-500 ring-offset-2 ring-offset-background transition-all [&>span]:bg-orange-500"
@@ -431,7 +471,7 @@ export default function HomePage() {
                   </div>
                 </div>
 
-                {/* Rate limit indicator (only shown in AI mode) */}
+                {/* Rate limit bar (AI mode only) */}
                 {!voiceOnlyMode && (
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -456,8 +496,8 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {/* Recording info */}
-                {!voiceOnlyMode && (
+                {/* Info banners — hidden while confirmation is active */}
+                {showRecordButton && !voiceOnlyMode && (
                   <div className="rounded-lg border border-border bg-muted/50 p-4">
                     <div className="flex items-start gap-3">
                       <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent/20">
@@ -474,7 +514,7 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {voiceOnlyMode && (
+                {showRecordButton && voiceOnlyMode && (
                   <div className="rounded-lg border border-border bg-muted/50 p-4">
                     <div className="flex items-start gap-3">
                       <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent/20">
@@ -483,15 +523,14 @@ export default function HomePage() {
                       <div className="flex-1 text-sm text-muted-foreground">
                         <p className="font-medium text-foreground mb-1">Browser Transcription</p>
                         <p className="text-xs leading-relaxed">
-                          Your speech will be transcribed directly and saved as a single memo in{" "}
-                          <strong>Unsorted</strong>. No AI organization.
+                          After recording, you'll name your memo and choose which folder to save it to.
                         </p>
                       </div>
                     </div>
                   </div>
                 )}
 
-                {/* Recording controls */}
+                {/* Recording progress */}
                 {recording && (
                   <div className="space-y-3">
                     <div className="flex items-center justify-between text-sm">
@@ -505,27 +544,136 @@ export default function HomePage() {
                   </div>
                 )}
 
-                <div className="pt-2">
-                  <Button
-                    className="w-full h-16 rounded-xl text-base font-semibold"
-                    onClick={recording ? stopRecording : startRecording}
-                    variant={recording ? "destructive" : "default"}
-                    disabled={isProcessing || (!voiceOnlyMode && rateLimitExceeded && !recording)}
-                    size="lg"
-                  >
-                    {recording ? (
-                      <>
-                        <Square className="mr-2 h-5 w-5 fill-current" />
-                        Stop Recording
-                      </>
-                    ) : (
-                      <>
-                        <Mic className="mr-2 h-5 w-5" />
-                        Start Recording
-                      </>
-                    )}
-                  </Button>
-                </div>
+                {/* ── Post-recording confirmation panel ── */}
+                {pendingTranscript && !confirmed && (
+                  <div className="rounded-xl border-2 border-accent/30 bg-gradient-to-b from-accent/5 to-transparent overflow-hidden">
+                    {/* Header */}
+                    <div className="flex items-center gap-2 px-4 pt-4 pb-3 border-b border-accent/15">
+                      <div className="flex size-6 items-center justify-center rounded-full bg-accent/20">
+                        <CheckCircle2 className="size-3.5 text-accent" />
+                      </div>
+                      <p className="text-sm font-semibold text-foreground">Memo captured</p>
+                    </div>
+
+                    <div className="p-4 space-y-4">
+                      {/* Transcript preview */}
+                      <div className="rounded-lg bg-muted/60 border border-border px-3 py-2.5">
+                        <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide mb-1">
+                          Transcript
+                        </p>
+                        <p className="text-xs text-foreground/80 leading-relaxed line-clamp-3 italic">
+                          "{pendingTranscript}"
+                        </p>
+                      </div>
+
+                      {/* Memo title input */}
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-medium text-foreground flex items-center gap-1.5">
+                          <PenLine className="size-3 text-accent" />
+                          Memo title
+                        </Label>
+                        <Input
+                          value={memoTitle}
+                          onChange={(e) => setMemoTitle(e.target.value)}
+                          placeholder={`Voice Memo ${memos.length + 1}`}
+                          className="h-9 text-sm bg-background"
+                          maxLength={80}
+                        />
+                        <p className="text-[11px] text-muted-foreground">
+                          Leave blank to use the default name.
+                        </p>
+                      </div>
+
+                      {/* Folder selector */}
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-medium text-foreground flex items-center gap-1.5">
+                          <Folder className="size-3 text-accent" />
+                          Save to folder
+                        </Label>
+                        <Select value={selectedFolder} onValueChange={setSelectedFolder}>
+                          <SelectTrigger className="w-full h-9 text-sm bg-background">
+                            <SelectValue placeholder="Select a folder" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {/* Hardcoded Unsorted always first */}
+                            <SelectItem value="Unsorted">
+                              <span className="flex items-center gap-2">
+                                <Folder className="size-3.5 text-muted-foreground" />
+                                Unsorted
+                              </span>
+                            </SelectItem>
+                            {/* User folders — already filtered to exclude "Unsorted" */}
+                            {folders.map((f) => (
+                              <SelectItem key={f.id} value={f.name}>
+                                <span className="flex items-center gap-2">
+                                  <Folder className="size-3.5 text-accent" />
+                                  {f.name}
+                                </span>
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      {/* Actions */}
+                      <div className="flex gap-2 pt-1">
+                        <Button
+                          className="flex-1 h-9 text-sm font-semibold"
+                          onClick={confirmAndSaveMemo}
+                        >
+                          Save memo
+                        </Button>
+                        <Button
+                          variant="outline"
+                          className="h-9 px-4 text-sm"
+                          onClick={discardPendingMemo}
+                        >
+                          Discard
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Success confirmation */}
+                {confirmed && (
+                  <div className="flex items-center gap-3 rounded-lg border border-green-500/40 bg-green-500/10 p-4">
+                    <CheckCircle2 className="h-5 w-5 shrink-0 text-green-500" />
+                    <div>
+                      <p className="text-sm font-semibold text-green-600 dark:text-green-400">
+                        Memo saved!
+                      </p>
+                      <p className="text-xs text-green-600/70 dark:text-green-400/70 mt-0.5">
+                        "{memoTitle.trim() || `Voice Memo ${memos.length}`}" → {selectedFolder}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Record / Stop button */}
+                {showRecordButton && (
+                  <div className="pt-1">
+                    <Button
+                      className="w-full h-16 rounded-xl text-base font-semibold"
+                      onClick={recording ? stopRecording : startRecording}
+                      variant={recording ? "destructive" : "default"}
+                      disabled={isProcessing || (!voiceOnlyMode && rateLimitExceeded && !recording)}
+                      size="lg"
+                    >
+                      {recording ? (
+                        <>
+                          <Square className="mr-2 h-5 w-5 fill-current" />
+                          Stop Recording
+                        </>
+                      ) : (
+                        <>
+                          <Mic className="mr-2 h-5 w-5" />
+                          Start Recording
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                )}
 
                 {isProcessing && (
                   <div className="flex items-center justify-center gap-3 rounded-lg border border-border bg-accent/10 p-4 text-sm text-accent">
@@ -545,15 +693,13 @@ export default function HomePage() {
             </Card>
           </div>
 
-          {/* Recent Memos - Right Side */}
+          {/* Recent Memos */}
           <div className="w-full">
             <Card className="border-2 border-border bg-secondary/20">
               <CardHeader className="flex flex-row items-center justify-between space-y-0">
                 <div>
                   <CardTitle>Recent Memos</CardTitle>
-                  <CardDescription className="mt-1">
-                    Your latest captured thoughts
-                  </CardDescription>
+                  <CardDescription className="mt-1">Your latest captured thoughts</CardDescription>
                 </div>
                 <Badge variant="secondary" className="font-mono text-base px-3 py-1">
                   {memos.length}
