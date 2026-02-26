@@ -1,12 +1,10 @@
 /**
- * File that keeps all the recorded memos in a React Context. 
- * It manages the shared memo list, handles adding/deleting memos, 
- * and provides the data to both the Home and Memos pages. 
- * Using this while we set up database schemas.
+ * File that keeps all the recorded memos in a React Context.
+ * It manages the shared memo list, handles adding/deleting/updating memos,
+ * and provides the data to both the Home and Memos pages.
  */
 
 "use client";
-
 
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/browser";
@@ -20,15 +18,27 @@ export type Memo = {
   date: string;
   audioUrl?: string;
   duration?: number;
-  category?: string;
+  category?: string; // folder name in UI
   transcription?: string;
   createdAt?: string;
+};
+
+type MemoUpdate = {
+  title?: string;
+  /**
+   * The memo text in the UI. Today this maps to the `transcription` column in Supabase.
+   * (We also accept `content` as an alias so UI code can be more readable.)
+   */
+  transcription?: string;
+  content?: string;
+  category?: string; // folder name in UI
 };
 
 interface MemoContextType {
   memos: Memo[];
   addMemo: (memo: Memo) => void;
   deleteMemo: (id: string) => void;
+  updateMemo: (id: string, updates: MemoUpdate) => void;
 }
 
 const MemoContext = createContext<MemoContextType | undefined>(undefined);
@@ -59,10 +69,9 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, session) => {
+    } = supabase.auth.onAuthStateChange((_event, session) => {
       const newUserId = session?.user?.id ?? null;
 
-      // If user changed, reset state
       setSessionUserId((prev) => {
         if (prev !== newUserId) {
           setMemos([]);
@@ -107,23 +116,26 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // Load folders
+      // Load folders first (and keep a local copy for mapping)
       const { data: folderRows, error: folderErr } = await supabase
         .from("folders")
         .select("id,name")
-        .eq("user_id", user.id);
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: true });
+
+      const localFolders = (folderRows ?? []) as FolderRow[];
 
       if (!cancelled) {
         if (folderErr) {
           console.error("Failed to load folders", folderErr);
           setFolders([]);
         } else {
-          setFolders((folderRows ?? []) as FolderRow[]);
+          setFolders(localFolders);
         }
         setFoldersLoaded(true);
       }
 
-      // Load memos (supports both folder_id and category-based schemas)
+      // Load memos
       const { data: memoRows, error: memoErr } = await supabase
         .from("memos")
         .select("id,title,transcription,created_at,folder_id")
@@ -136,10 +148,11 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      // Map using the SAME folder rows we just loaded
+      const folderMap = new Map(localFolders.map((f) => [f.id, f.name]));
+
       const mapped: Memo[] = ((memoRows ?? []) as MemoRow[]).map((r) => {
-        const category = r.folder_id
-          ? folders.find((f) => f.id === r.folder_id)?.name || "Unsorted"
-          : "Unsorted";
+        const category = r.folder_id ? folderMap.get(r.folder_id) ?? "Unsorted" : "Unsorted";
         const createdAt = r.created_at ?? undefined;
         return {
           id: r.id,
@@ -163,7 +176,6 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
   }, [supabase, sessionUserId]);
 
   const addMemo = (newMemo: Memo) => {
-    // Optimistic UI update
     const optimistic: Memo = {
       ...newMemo,
       category: newMemo.category || "Unsorted",
@@ -174,14 +186,12 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
 
     setMemos((prev) => [optimistic, ...prev]);
 
-    // Persist in background
     void (async () => {
       const {
         data: { user },
       } = await supabase.auth.getUser();
       if (!user) return;
 
-      // Resolve folder_id by folder name; fallback to Unsorted
       const desiredFolderName = optimistic.category || "Unsorted";
       const unsortedId = folderIdByName.get("Unsorted");
       const folderId = folderIdByName.get(desiredFolderName) || unsortedId;
@@ -190,7 +200,7 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
         user_id: user.id,
         title: optimistic.title,
         transcription: optimistic.transcription ?? null,
-        folder_id: folderId,
+        folder_id: folderId ?? null,
         status: "ready",
       };
 
@@ -205,7 +215,6 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // Reconcile optimistic id with DB id (only if different)
       if (inserted?.id && inserted.id !== optimistic.id) {
         setMemos((prev) =>
           prev.map((m) =>
@@ -224,7 +233,6 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteMemo = (id: string) => {
-    // Optimistic UI update
     setMemos((prev) => prev.filter((m) => m.id !== id));
 
     void (async () => {
@@ -233,11 +241,7 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
       } = await supabase.auth.getUser();
       if (!user) return;
 
-      const { error } = await supabase
-        .from("memos")
-        .delete()
-        .eq("id", id)
-        .eq("user_id", user.id);
+      const { error } = await supabase.from("memos").delete().eq("id", id).eq("user_id", user.id);
 
       if (error) {
         console.error("Failed to delete memo", error);
@@ -245,8 +249,68 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
     })();
   };
 
+  const updateMemo = (id: string, updates: MemoUpdate) => {
+    // Support `content` as an alias for `transcription`
+    const nextTranscription =
+      typeof updates.transcription === "string"
+        ? updates.transcription
+        : typeof updates.content === "string"
+          ? updates.content
+          : undefined;
+
+    // optimistic update with a stable snapshot for rollback
+    let prevSnapshot: Memo[] = [];
+    setMemos((cur) => {
+      prevSnapshot = cur;
+      return cur.map((m) =>
+        m.id === id
+          ? {
+              ...m,
+              title: typeof updates.title === "string" ? updates.title : m.title,
+              transcription: typeof nextTranscription === "string" ? nextTranscription : m.transcription,
+              category: typeof updates.category === "string" ? updates.category : m.category,
+            }
+          : m
+      );
+    });
+
+    void (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const payload: any = {};
+      if (typeof updates.title === "string") payload.title = updates.title;
+
+      // Allow editing the memo text itself (stored as `transcription` in DB)
+      if (typeof nextTranscription === "string") payload.transcription = nextTranscription;
+
+      if (typeof updates.category === "string") {
+        const targetName = updates.category || "Unsorted";
+        const unsortedId = folderIdByName.get("Unsorted") ?? null;
+        payload.folder_id = folderIdByName.get(targetName) ?? unsortedId;
+      }
+
+      // Nothing to update
+      if (Object.keys(payload).length === 0) return;
+
+      const { error } = await supabase
+        .from("memos")
+        .update(payload)
+        .eq("id", id)
+        .eq("user_id", user.id);
+
+      if (error) {
+        console.error("Failed to update memo", error);
+        // rollback if it fails
+        setMemos(prevSnapshot);
+      }
+    })();
+  };
+
   return (
-    <MemoContext.Provider value={{ memos, addMemo, deleteMemo }}>
+    <MemoContext.Provider value={{ memos, addMemo, deleteMemo, updateMemo }}>
       {children}
     </MemoContext.Provider>
   );

@@ -31,7 +31,7 @@ import {
 import { DotGridBackground } from "@/components/ui/dot-grid-background"
 
 export default function MemosPage() {
-  const { memos, deleteMemo } = useMemos()
+  const { memos, deleteMemo, updateMemo } = useMemos()
 
   const router = useRouter()
   const supabase = createClient()
@@ -41,6 +41,10 @@ export default function MemosPage() {
   const [filteredMemos, setFilteredMemos] = useState(memos)
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedCategory, setSelectedCategory] = useState("all")
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editTitle, setEditTitle] = useState("")
+  const [editFolder, setEditFolder] = useState("Unsorted")
+  const [editTranscription, setEditTranscription] = useState("")
 
   const categories = [
     "all",
@@ -198,9 +202,17 @@ export default function MemosPage() {
                         <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent/20">
                           <Mic className="size-4 text-accent" />
                         </div>
-                        <CardTitle className="text-base truncate">
-                          {memo.title}
-                        </CardTitle>
+                        {editingId === memo.id ? (
+                          <Input
+                            value={editTitle}
+                            onChange={(e) => setEditTitle(e.target.value)}
+                            className="h-9"
+                          />
+                        ) : (
+                          <CardTitle className="text-base truncate">
+                            {memo.title}
+                          </CardTitle>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
                         <Calendar className="size-3" />
@@ -219,6 +231,16 @@ export default function MemosPage() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem
+                          onClick={() => {
+                            setEditingId(memo.id)
+                            setEditTitle(memo.title)
+                            setEditFolder(memo.category || "Unsorted")
+                            setEditTranscription(memo.transcription || "")
+                          }}
+                        >
+                          Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
                           className="text-destructive focus:text-destructive"
                           onClick={() => deleteMemo(memo.id)}
                         >
@@ -230,12 +252,71 @@ export default function MemosPage() {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  <Badge
-                    variant="outline"
-                    className="text-xs font-medium border-accent/50 text-accent"
-                  >
-                    {memo.category || "Unsorted"}
-                  </Badge>
+                  {editingId === memo.id ? (
+                    <div className="space-y-2">
+                      <Select value={editFolder} onValueChange={setEditFolder}>
+                        <SelectTrigger className="h-10 rounded-xl border-border bg-secondary/40">
+                          <SelectValue placeholder="Select folder" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="Unsorted">Unsorted</SelectItem>
+                          {folders.map((f) => (
+                            <SelectItem key={f.id} value={f.name}>
+                              {f.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+
+                      <div className="space-y-2">
+                        <p className="text-xs text-muted-foreground">Memo</p>
+                        <textarea
+                          value={editTranscription}
+                          onChange={(e) => setEditTranscription(e.target.value)}
+                          placeholder="Edit memo text…"
+                          className="min-h-[120px] w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-accent"
+                        />
+                      </div>
+
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          className="rounded-xl"
+                          onClick={() => {
+                            updateMemo(memo.id, {
+                              title: editTitle.trim() || "Voice Memo",
+                              category: editFolder,
+                              content: editTranscription,
+                            })
+                            setEditingId(null)
+                            setEditTranscription("")
+                          }}
+                        >
+                          Save
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="rounded-xl"
+                          onClick={() => {
+                            setEditingId(null)
+                            setEditTitle("")
+                            setEditFolder("Unsorted")
+                            setEditTranscription("")
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <Badge
+                      variant="outline"
+                      className="text-xs font-medium border-accent/50 text-accent"
+                    >
+                      {memo.category || "Unsorted"}
+                    </Badge>
+                  )}
 
                   {memo.transcription && (
                     <div className="rounded-lg border border-border bg-muted/50 p-3">
