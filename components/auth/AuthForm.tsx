@@ -189,6 +189,31 @@ export default function AuthForm({ mode }: AuthFormProps) {
     }
   }
 
+  async function onForgotPassword() {
+    const cleanEmail = email.trim()
+
+    if (!isValidEmail(cleanEmail)) {
+      toast.error("Enter your email above first.")
+      return
+    }
+
+    setLoading(true)
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+        redirectTo: `${window.location.origin}/reset-password`,
+      })
+
+      if (error) {
+        toast.error(error.message)
+        return
+      }
+
+      toast.success("Password reset email sent! Check your inbox.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
   function goBackToForm() {
     setSignupStep("form")
     setCode("")
@@ -372,7 +397,9 @@ export default function AuthForm({ mode }: AuthFormProps) {
               {!isSignup && (
                 <button
                   type="button"
-                  className="self-end text-xs text-muted-foreground transition-colors hover:text-accent"
+                  onClick={onForgotPassword}
+                  disabled={loading}
+                  className="self-end text-xs text-muted-foreground transition-colors hover:text-accent disabled:opacity-60"
                 >
                   Forgot password?
                 </button>
