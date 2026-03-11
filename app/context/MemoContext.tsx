@@ -25,6 +25,7 @@ export type Memo = {
   category?: string; // folder name in UI
   transcription?: string;
   createdAt?: string;
+  reminder_at?: string | null; // ISO timestamp — null means no reminder
 };
 
 type MemoUpdate = {
@@ -36,6 +37,7 @@ type MemoUpdate = {
   transcription?: string;
   content?: string;
   category?: string; // folder name in UI
+  reminder_at?: string | null;
 };
 
 interface MemoContextType {
@@ -56,6 +58,7 @@ type MemoRow = {
   category: string | null;
   created_at: string | null;
   updated_at?: string | null;
+  reminder_at?: string | null;
 };
 
 function isUuid(value: string) {
@@ -164,6 +167,7 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
           category,
           transcription: r.transcription ?? undefined,
           createdAt,
+          reminder_at: r.reminder_at ?? null,
         };
       });
 
@@ -184,6 +188,7 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
       status: "ready",
       createdAt: newMemo.createdAt,
       date: newMemo.date || formatDateLabel(newMemo.createdAt),
+      reminder_at: newMemo.reminder_at ?? null,
     };
 
     setMemos((prev) => [optimistic, ...prev]);
@@ -203,6 +208,7 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
         p_title: optimistic.title,
         p_category: category,
         p_transcription: optimistic.transcription ?? "",
+        p_reminder_at: optimistic.reminder_at ?? null,  // ← NEW
       });
 
       if (error) {
@@ -266,12 +272,12 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
               title: typeof updates.title === "string" ? updates.title : m.title,
               transcription: typeof nextTranscription === "string" ? nextTranscription : m.transcription,
               category: typeof updates.category === "string" ? updates.category : m.category,
+              reminder_at: "reminder_at" in updates ? (updates.reminder_at ?? null) : m.reminder_at,
             }
           : m
       );
     });
 
-    // Snapshot folderIdByName at call time to avoid stale closure inside the async IIFE
     void (async (_snapshotFolderIdByName: Map<string, string>) => {
       const {
         data: { user },
@@ -288,8 +294,11 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
         typeof nextTranscription === "string"
           ? nextTranscription
           : existingMemo?.transcription ?? "";
+      const reminderAtToSave =
+        "reminder_at" in updates
+          ? (updates.reminder_at ?? null)
+          : (existingMemo?.reminder_at ?? null);
 
-      // Nothing to update
       if (!existingMemo && typeof nextTitle !== "string" && typeof nextCategory !== "string" && typeof nextTranscription !== "string") return;
 
       const { error } = await supabase.rpc("upsert_encrypted_memo", {
@@ -298,11 +307,11 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
         p_title: titleToSave,
         p_category: categoryToSave,
         p_transcription: transcriptionToSave,
+        p_reminder_at: reminderAtToSave,  // ← NEW
       });
 
       if (error) {
         console.error("Failed to update encrypted memo", JSON.stringify(error), { id });
-        // rollback if it fails
         setMemos(prevSnapshot);
       }
     })(new Map(folderIdByName));

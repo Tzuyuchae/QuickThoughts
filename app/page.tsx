@@ -310,6 +310,8 @@ export default function HomePage() {
 
     const formData = new FormData()
     formData.append("audio", audioBlob, fileName || "recording.webm")
+    formData.append("timezone", Intl.DateTimeFormat().resolvedOptions().timeZone)
+    formData.append("timezoneOffset", String(new Date().getTimezoneOffset()))
 
     try {
       const response = await fetch("/api/gemini", { method: "POST", body: formData })
@@ -326,7 +328,7 @@ export default function HomePage() {
 
       const dateLabel = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })
 
-      const thoughts: Array<{ text: string; label?: string; folder?: string }> = Array.isArray(data?.thoughts)
+      const thoughts: Array<{ text: string; label?: string; folder?: string; reminder_at?: string | null }> = Array.isArray(data?.thoughts)
         ? data.thoughts
         : []
 
@@ -335,6 +337,7 @@ export default function HomePage() {
           text: String(t?.text ?? "").trim(),
           label: String(t?.label ?? "").trim(),
           folder: String(t?.folder ?? "Unsorted").trim() || "Unsorted",
+          reminder_at: t?.reminder_at ?? null,
         }))
         .filter((t) => t.text.length > 0)
         .slice(0, 10)
@@ -359,6 +362,7 @@ export default function HomePage() {
           date: dateLabel,
           category: t.folder,
           transcription: t.text,
+          reminder_at: t.reminder_at ?? null,
         })
       })
     } catch (error: any) {

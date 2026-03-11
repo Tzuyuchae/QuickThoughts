@@ -12,7 +12,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Home, FolderOpen, User, LogOut, Menu, X } from "lucide-react"
+import { Home, FolderOpen, User, LogOut, Menu, X, Calendar } from "lucide-react"
 import Link from "next/link"
 import Image from "next/image"
 
@@ -55,6 +55,7 @@ export function Navbar() {
   }
 
   const navItems = [
+    { href: "/calendar", label: "Calendar", icon: Calendar },
     { href: "/", label: "Home", icon: Home },
     { href: "/memos", label: "All Memos", icon: FolderOpen },
   ]
