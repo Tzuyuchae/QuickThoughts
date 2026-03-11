@@ -8,6 +8,7 @@
 
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/browser";
+import { error } from "console";
 
 export type MemoStatus = "ready" | "classifying" | "error";
 
@@ -143,7 +144,7 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
         .order("created_at", { ascending: false });
 
       if (memoErr) {
-        console.error("Failed to load memos", memoErr);
+        console.error("Failed to update memo", JSON.stringify(memoErr, null, 2));
         if (!cancelled) setMemos([]);
         return;
       }
@@ -186,15 +187,15 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
 
     setMemos((prev) => [optimistic, ...prev]);
 
-    void (async () => {
+    void (async (snapshotFolderIdByName: Map<string, string>) => {
       const {
         data: { user },
       } = await supabase.auth.getUser();
       if (!user) return;
 
       const desiredFolderName = optimistic.category || "Unsorted";
-      const unsortedId = folderIdByName.get("Unsorted");
-      const folderId = folderIdByName.get(desiredFolderName) || unsortedId;
+      const unsortedId = snapshotFolderIdByName.get("Unsorted");
+      const folderId = snapshotFolderIdByName.get(desiredFolderName) || unsortedId;
 
       const payload: any = {
         user_id: user.id,
@@ -211,7 +212,7 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
         .single();
 
       if (error) {
-        console.error("Failed to insert memo", error);
+        console.error("Failed to insert memo", JSON.stringify(error), { payload });
         return;
       }
 
@@ -229,7 +230,7 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
           )
         );
       }
-    })();
+    })(new Map(folderIdByName));
   };
 
   const deleteMemo = (id: string) => {
@@ -244,7 +245,7 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
       const { error } = await supabase.from("memos").delete().eq("id", id).eq("user_id", user.id);
 
       if (error) {
-        console.error("Failed to delete memo", error);
+        console.error("Failed to delete memo", JSON.stringify(error), { id });
       }
     })();
   };
@@ -274,7 +275,8 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
       );
     });
 
-    void (async () => {
+    // Snapshot folderIdByName at call time to avoid stale closure inside the async IIFE
+    void (async (snapshotFolderIdByName: Map<string, string>) => {
       const {
         data: { user },
       } = await supabase.auth.getUser();
@@ -288,8 +290,8 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
 
       if (typeof updates.category === "string") {
         const targetName = updates.category || "Unsorted";
-        const unsortedId = folderIdByName.get("Unsorted") ?? null;
-        payload.folder_id = folderIdByName.get(targetName) ?? unsortedId;
+        const unsortedId = snapshotFolderIdByName.get("Unsorted") ?? null;
+        payload.folder_id = snapshotFolderIdByName.get(targetName) ?? unsortedId;
       }
 
       // Nothing to update
@@ -302,11 +304,11 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
         .eq("user_id", user.id);
 
       if (error) {
-        console.error("Failed to update memo", error);
+        console.error("Failed to update memo", JSON.stringify(error), { id, payload });
         // rollback if it fails
         setMemos(prevSnapshot);
       }
-    })();
+    })(new Map(folderIdByName));
   };
 
   return (
