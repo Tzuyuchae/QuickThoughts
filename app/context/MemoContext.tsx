@@ -2,6 +2,10 @@
  * File that keeps all the recorded memos in a React Context.
  * It manages the shared memo list, handles adding/deleting/updating memos,
  * and provides the data to both the Home and Memos pages.
+ *
+ * This version loads memo text through a decrypting RPC and writes memo text
+ * through an encrypting RPC so plaintext memo content is not persisted via
+ * direct table insert/update calls from the client.
  */
 
 "use client";
@@ -49,9 +53,14 @@ type MemoRow = {
   id: string;
   title: string | null;
   transcription: string | null;
+  category: string | null;
   created_at: string | null;
-  folder_id: string | null;
+  updated_at?: string | null;
 };
+
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
 
 function formatDateLabel(iso?: string | null) {
   const d = iso ? new Date(iso) : new Date();
@@ -135,24 +144,17 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
         setFoldersLoaded(true);
       }
 
-      // Load memos
-      const { data: memoRows, error: memoErr } = await supabase
-        .from("memos")
-        .select("id,title,transcription,created_at,folder_id")
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: false });
+      // Load memos through a decrypting RPC instead of selecting plaintext columns directly
+      const { data: memoRows, error: memoErr } = await supabase.rpc("get_user_memos_decrypted");
 
       if (memoErr) {
-        console.error("Failed to update memo", JSON.stringify(memoErr, null, 2));
+        console.error("Failed to load decrypted memos", JSON.stringify(memoErr, null, 2));
         if (!cancelled) setMemos([]);
         return;
       }
 
-      // Map using the SAME folder rows we just loaded
-      const folderMap = new Map(localFolders.map((f) => [f.id, f.name]));
-
       const mapped: Memo[] = ((memoRows ?? []) as MemoRow[]).map((r) => {
-        const category = r.folder_id ? folderMap.get(r.folder_id) ?? "Unsorted" : "Unsorted";
+        const category = r.category ?? "Unsorted";
         const createdAt = r.created_at ?? undefined;
         return {
           id: r.id,
@@ -186,44 +188,39 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
 
     setMemos((prev) => [optimistic, ...prev]);
 
-    void (async (snapshotFolderIdByName: Map<string, string>) => {
+    void (async (_snapshotFolderIdByName: Map<string, string>) => {
       const {
         data: { user },
       } = await supabase.auth.getUser();
       if (!user) return;
 
-      const desiredFolderName = optimistic.category || "Unsorted";
-      const unsortedId = snapshotFolderIdByName.get("Unsorted");
-      const folderId = snapshotFolderIdByName.get(desiredFolderName) || unsortedId;
+      const category = optimistic.category || "Unsorted";
+      const persistedId = isUuid(optimistic.id) ? optimistic.id : crypto.randomUUID();
 
-      const payload: any = {
-        user_id: user.id,
-        title: optimistic.title,
-        transcription: optimistic.transcription ?? null,
-        folder_id: folderId ?? null,
-        status: "ready",
-      };
-
-      const { data: inserted, error } = await supabase
-        .from("memos")
-        .insert(payload)
-        .select("id,created_at")
-        .single();
+      const { error } = await supabase.rpc("upsert_encrypted_memo", {
+        p_id: persistedId,
+        p_user_id: user.id,
+        p_title: optimistic.title,
+        p_category: category,
+        p_transcription: optimistic.transcription ?? "",
+      });
 
       if (error) {
-        console.error("Failed to insert memo", JSON.stringify(error), { payload });
+        console.error("Failed to insert encrypted memo", JSON.stringify(error), {
+          id: optimistic.id,
+          title: optimistic.title,
+          category,
+        });
         return;
       }
 
-      if (inserted?.id && inserted.id !== optimistic.id) {
+      if (persistedId !== optimistic.id) {
         setMemos((prev) =>
           prev.map((m) =>
             m.id === optimistic.id
               ? {
                   ...m,
-                  id: inserted.id,
-                  createdAt: inserted.created_at ?? m.createdAt,
-                  date: formatDateLabel(inserted.created_at ?? m.createdAt),
+                  id: persistedId,
                 }
               : m
           )
@@ -275,35 +272,36 @@ export function MemoProvider({ children }: { children: React.ReactNode }) {
     });
 
     // Snapshot folderIdByName at call time to avoid stale closure inside the async IIFE
-    void (async (snapshotFolderIdByName: Map<string, string>) => {
+    void (async (_snapshotFolderIdByName: Map<string, string>) => {
       const {
         data: { user },
       } = await supabase.auth.getUser();
       if (!user) return;
 
-      const payload: any = {};
-      if (typeof updates.title === "string") payload.title = updates.title;
+      const nextTitle = typeof updates.title === "string" ? updates.title : undefined;
+      const nextCategory = typeof updates.category === "string" ? updates.category || "Unsorted" : undefined;
+      const existingMemo = prevSnapshot.find((m) => m.id === id);
 
-      // Allow editing the memo text itself (stored as `transcription` in DB)
-      if (typeof nextTranscription === "string") payload.transcription = nextTranscription;
-
-      if (typeof updates.category === "string") {
-        const targetName = updates.category || "Unsorted";
-        const unsortedId = snapshotFolderIdByName.get("Unsorted") ?? null;
-        payload.folder_id = snapshotFolderIdByName.get(targetName) ?? unsortedId;
-      }
+      const titleToSave = nextTitle ?? existingMemo?.title ?? "Voice Memo";
+      const categoryToSave = nextCategory ?? existingMemo?.category ?? "Unsorted";
+      const transcriptionToSave =
+        typeof nextTranscription === "string"
+          ? nextTranscription
+          : existingMemo?.transcription ?? "";
 
       // Nothing to update
-      if (Object.keys(payload).length === 0) return;
+      if (!existingMemo && typeof nextTitle !== "string" && typeof nextCategory !== "string" && typeof nextTranscription !== "string") return;
 
-      const { error } = await supabase
-        .from("memos")
-        .update(payload)
-        .eq("id", id)
-        .eq("user_id", user.id);
+      const { error } = await supabase.rpc("upsert_encrypted_memo", {
+        p_id: id,
+        p_user_id: user.id,
+        p_title: titleToSave,
+        p_category: categoryToSave,
+        p_transcription: transcriptionToSave,
+      });
 
       if (error) {
-        console.error("Failed to update memo", JSON.stringify(error), { id, payload });
+        console.error("Failed to update encrypted memo", JSON.stringify(error), { id });
         // rollback if it fails
         setMemos(prevSnapshot);
       }

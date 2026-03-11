@@ -130,7 +130,7 @@ export default function MemosPage() {
               </p>
               {searchQuery && (
                 <Badge variant="secondary" className="ml-2">
-                  Searching: "{searchQuery}"
+                  Searching: &ldquo;{searchQuery}&rdquo;
                 </Badge>
               )}
               {selectedCategory !== "all" && (
