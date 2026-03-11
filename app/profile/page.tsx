@@ -9,7 +9,30 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { AlertTriangle, Eye, EyeOff, KeyRound, Mail, UserRound } from "lucide-react"
+import { Switch } from "@/components/ui/switch"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
+  AlertTriangle,
+  Bell,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Mail,
+  Monitor,
+  Moon,
+  Palette,
+  Shield,
+  Sun,
+  UserRound,
+} from "lucide-react"
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function getUsernameFromUser(user: any) {
   return (
@@ -22,14 +45,36 @@ function getUsernameFromUser(user: any) {
   )
 }
 
+type Theme = "light" | "dark" | "system"
+type FontSize = "small" | "medium" | "large"
+
+interface NotificationSettings {
+  // Weekly digest of memo/folder activity — you send this via a cron job
+  // (e.g. Supabase Edge Function + Resend) that checks created_at timestamps
+  emailUpdates: boolean
+  // Triggered on: password changed, new sign-in detected, account deletion
+  // Hook into your /api/notifications/security-alert endpoint after each event
+  securityAlerts: boolean
+}
+
+interface DisplaySettings {
+  theme: Theme
+  fontSize: FontSize
+  compactMode: boolean
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
+
 export default function ProfilePage() {
   const supabase = useMemo(() => createClient(), [])
   const router = useRouter()
 
+  // Profile
   const [loading, setLoading] = useState(true)
   const [email, setEmail] = useState("")
   const [username, setUsername] = useState("")
 
+  // Password
   const [currentPassword, setCurrentPassword] = useState("")
   const [newPassword, setNewPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
@@ -40,29 +85,49 @@ export default function ProfilePage() {
   const [passwordMessage, setPasswordMessage] = useState<string | null>(null)
   const [passwordError, setPasswordError] = useState<string | null>(null)
 
+  // Delete
   const [deleteLoading, setDeleteLoading] = useState(false)
   const [deleteMessage, setDeleteMessage] = useState<string | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
+  // Notifications — persisted to Supabase user_metadata
+  const [notifications, setNotifications] = useState<NotificationSettings>({
+    emailUpdates: true,
+    securityAlerts: true,
+  })
+  const [notifSaving, setNotifSaving] = useState(false)
+  const [notifSaved, setNotifSaved] = useState(false)
+  const [notifError, setNotifError] = useState<string | null>(null)
+
+  // Display — persisted to Supabase user_metadata
+  const [display, setDisplay] = useState<DisplaySettings>({
+    theme: "system",
+    fontSize: "medium",
+    compactMode: false,
+  })
+  const [displaySaving, setDisplaySaving] = useState(false)
+  const [displaySaved, setDisplaySaved] = useState(false)
+  const [displayError, setDisplayError] = useState<string | null>(null)
+
+  // ── Load profile + settings from Supabase ─────────────────────────────────
   useEffect(() => {
     let mounted = true
 
     async function loadProfile() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser()
+      const { data: { user } } = await supabase.auth.getUser()
 
       if (!mounted) return
-
-      if (!user) {
-        router.replace("/login")
-        return
-      }
+      if (!user) { router.replace("/login"); return }
 
       const emailValue = user.email ?? ""
       const metadataUsername = getUsernameFromUser(user)
 
       setEmail(emailValue)
+
+      // Hydrate settings from user_metadata if previously saved
+      const meta = user.user_metadata ?? {}
+      if (meta.notifications) setNotifications(meta.notifications)
+      if (meta.display) setDisplay(meta.display)
 
       if (metadataUsername) {
         setUsername(metadataUsername)
@@ -76,67 +141,42 @@ export default function ProfilePage() {
         .eq("user_id", user.id)
         .maybeSingle()
 
-      console.log("Profile username lookup", { authUserId: user.id, profileUsername: profileRow?.username })
+      if (!mounted) return
 
       setUsername(profileRow?.username || emailValue.split("@")[0] || "Unknown User")
       setLoading(false)
     }
 
     void loadProfile()
-
-    return () => {
-      mounted = false
-    }
+    return () => { mounted = false }
   }, [router, supabase])
 
+  // ── Password change ───────────────────────────────────────────────────────
   async function handlePasswordChange(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     setPasswordMessage(null)
     setPasswordError(null)
 
-    if (!email) {
-      setPasswordError("Could not find your email address.")
-      return
-    }
-
-    if (!currentPassword || !newPassword || !confirmPassword) {
-      setPasswordError("Fill out all password fields.")
-      return
-    }
-
-    if (newPassword.length < 6) {
-      setPasswordError("Your new password must be at least 6 characters long.")
-      return
-    }
-
-    if (newPassword !== confirmPassword) {
-      setPasswordError("New password and confirmation do not match.")
-      return
-    }
+    if (!email) { setPasswordError("Could not find your email address."); return }
+    if (!currentPassword || !newPassword || !confirmPassword) { setPasswordError("Fill out all password fields."); return }
+    if (newPassword.length < 6) { setPasswordError("Your new password must be at least 6 characters long."); return }
+    if (newPassword !== confirmPassword) { setPasswordError("New password and confirmation do not match."); return }
 
     setPasswordSaving(true)
 
-    const { error: verifyError } = await supabase.auth.signInWithPassword({
-      email,
-      password: currentPassword,
-    })
+    const { error: verifyError } = await supabase.auth.signInWithPassword({ email, password: currentPassword })
+    if (verifyError) { setPasswordSaving(false); setPasswordError("Your current password is incorrect."); return }
 
-    if (verifyError) {
-      setPasswordSaving(false)
-      setPasswordError("Your current password is incorrect.")
-      return
-    }
-
-    const { error: updateError } = await supabase.auth.updateUser({
-      password: newPassword,
-    })
-
+    const { error: updateError } = await supabase.auth.updateUser({ password: newPassword })
     setPasswordSaving(false)
 
-    if (updateError) {
-      setPasswordError(updateError.message || "Could not update your password.")
-      return
-    }
+    if (updateError) { setPasswordError(updateError.message || "Could not update your password."); return }
+
+    // If security alerts are on, trigger a "password changed" email here:
+    // await fetch("/api/notifications/security-alert", {
+    //   method: "POST",
+    //   body: JSON.stringify({ type: "password_changed", email }),
+    // })
 
     setCurrentPassword("")
     setNewPassword("")
@@ -144,6 +184,7 @@ export default function ProfilePage() {
     setPasswordMessage("Your password has been updated.")
   }
 
+  // ── Delete account ────────────────────────────────────────────────────────
   async function handleDeleteRequest() {
     setDeleteMessage(null)
     setDeleteError(null)
@@ -151,12 +192,11 @@ export default function ProfilePage() {
     const confirmed = window.confirm(
       "This will permanently delete your account, profile, folders, and memos. This cannot be undone. Continue?"
     )
-
     if (!confirmed) return
 
-    const confirmationText = window.prompt('Type DELETE to permanently remove your account.')
+    const confirmationText = window.prompt("Type DELETE to permanently remove your account.")
     if (confirmationText !== "DELETE") {
-      setDeleteError('Account deletion cancelled. You must type DELETE to confirm.')
+      setDeleteError("Account deletion cancelled. You must type DELETE to confirm.")
       return
     }
 
@@ -165,18 +205,11 @@ export default function ProfilePage() {
     try {
       const response = await fetch("/api/account/delete", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
       })
-
       const result = await response.json().catch(() => null)
 
-      if (!response.ok) {
-        setDeleteLoading(false)
-        setDeleteError(result?.error || "Could not delete your account.")
-        return
-      }
+      if (!response.ok) { setDeleteLoading(false); setDeleteError(result?.error || "Could not delete your account."); return }
 
       await supabase.auth.signOut()
       setDeleteLoading(false)
@@ -188,6 +221,41 @@ export default function ProfilePage() {
     }
   }
 
+  // ── Save notifications → Supabase user_metadata ───────────────────────────
+  async function handleSaveNotifications() {
+    setNotifSaving(true)
+    setNotifError(null)
+
+    const { error } = await supabase.auth.updateUser({
+      data: { notifications },
+    })
+
+    setNotifSaving(false)
+
+    if (error) { setNotifError("Could not save notification preferences."); return }
+
+    setNotifSaved(true)
+    setTimeout(() => setNotifSaved(false), 2500)
+  }
+
+  // ── Save display → Supabase user_metadata ─────────────────────────────────
+  async function handleSaveDisplay() {
+    setDisplaySaving(true)
+    setDisplayError(null)
+
+    const { error } = await supabase.auth.updateUser({
+      data: { display },
+    })
+
+    setDisplaySaving(false)
+
+    if (error) { setDisplayError("Could not save appearance settings."); return }
+
+    setDisplaySaved(true)
+    setTimeout(() => setDisplaySaved(false), 2500)
+  }
+
+  // ── Loading ───────────────────────────────────────────────────────────────
   if (loading) {
     return (
       <div className="min-h-screen bg-background text-foreground">
@@ -199,19 +267,23 @@ export default function ProfilePage() {
     )
   }
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-background text-foreground">
       <Navbar />
 
       <main className="container mx-auto px-4 py-10">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
+
+          {/* Page header */}
           <div>
             <h1 className="text-3xl font-bold tracking-tight">Profile & Settings</h1>
             <p className="mt-2 text-sm text-muted-foreground">
-              Review your account details, change your password, and start the account deletion flow.
+              Review your account details, change your password, and configure your preferences.
             </p>
           </div>
 
+          {/* Account details */}
           <Card>
             <CardHeader>
               <CardTitle>Account Details</CardTitle>
@@ -241,6 +313,132 @@ export default function ProfilePage() {
             </CardContent>
           </Card>
 
+          {/* Appearance */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Palette className="size-5" />
+                Appearance
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="font-medium text-sm">Theme</p>
+                  <p className="text-sm text-muted-foreground">Choose how the interface looks.</p>
+                </div>
+                <Select
+                  value={display.theme}
+                  onValueChange={(val) => setDisplay((prev) => ({ ...prev, theme: val as Theme }))}
+                >
+                  <SelectTrigger className="w-36">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="light">
+                      <span className="flex items-center gap-2"><Sun className="size-4" /> Light</span>
+                    </SelectItem>
+                    <SelectItem value="dark">
+                      <span className="flex items-center gap-2"><Moon className="size-4" /> Dark</span>
+                    </SelectItem>
+                    <SelectItem value="system">
+                      <span className="flex items-center gap-2"><Monitor className="size-4" /> System</span>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="h-px w-full bg-border" />
+
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="font-medium text-sm">Font Size</p>
+                  <p className="text-sm text-muted-foreground">Adjust the base text size across the app.</p>
+                </div>
+                <Select
+                  value={display.fontSize}
+                  onValueChange={(val) => setDisplay((prev) => ({ ...prev, fontSize: val as FontSize }))}
+                >
+                  <SelectTrigger className="w-36">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="small">Small</SelectItem>
+                    <SelectItem value="medium">Medium</SelectItem>
+                    <SelectItem value="large">Large</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="h-px w-full bg-border" />
+
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="font-medium text-sm">Compact Mode</p>
+                  <p className="text-sm text-muted-foreground">Reduce spacing to fit more content on screen.</p>
+                </div>
+                <Switch
+                  checked={display.compactMode}
+                  onCheckedChange={(val) => setDisplay((prev) => ({ ...prev, compactMode: val }))}
+                />
+              </div>
+
+              {displayError && <p className="text-sm text-destructive">{displayError}</p>}
+              {displaySaved && <p className="text-sm text-emerald-600">Appearance settings saved.</p>}
+
+              <Button type="button" onClick={handleSaveDisplay} disabled={displaySaving}>
+                {displaySaving ? "Saving..." : "Save Appearance"}
+              </Button>
+            </CardContent>
+          </Card>
+
+          {/* Notifications */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Bell className="size-5" />
+                Notifications
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="font-medium text-sm">Weekly Digest</p>
+                  <p className="text-sm text-muted-foreground">
+                    A weekly summary of memos and folders you&apos;ve created.
+                  </p>
+                </div>
+                <Switch
+                  checked={notifications.emailUpdates}
+                  onCheckedChange={(val) => setNotifications((prev) => ({ ...prev, emailUpdates: val }))}
+                />
+              </div>
+
+              <div className="h-px w-full bg-border" />
+
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="font-medium text-sm">Security Alerts</p>
+                  <p className="text-sm text-muted-foreground">
+                    Email notifications when your password changes or a new sign-in is detected.
+                  </p>
+                </div>
+                <Switch
+                  checked={notifications.securityAlerts}
+                  onCheckedChange={(val) => setNotifications((prev) => ({ ...prev, securityAlerts: val }))}
+                />
+              </div>
+
+              {notifError && <p className="text-sm text-destructive">{notifError}</p>}
+              {notifSaved && <p className="text-sm text-emerald-600">Notification preferences saved.</p>}
+
+              <Button type="button" onClick={handleSaveNotifications} disabled={notifSaving}>
+                {notifSaving ? "Saving..." : "Save Notifications"}
+              </Button>
+            </CardContent>
+          </Card>
+
+          {/* Reset password */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -316,13 +514,8 @@ export default function ProfilePage() {
                   </div>
                 </div>
 
-                {passwordError && (
-                  <p className="text-sm text-destructive">{passwordError}</p>
-                )}
-
-                {passwordMessage && (
-                  <p className="text-sm text-emerald-600">{passwordMessage}</p>
-                )}
+                {passwordError && <p className="text-sm text-destructive">{passwordError}</p>}
+                {passwordMessage && <p className="text-sm text-emerald-600">{passwordMessage}</p>}
 
                 <Button type="submit" disabled={passwordSaving}>
                   {passwordSaving ? "Updating..." : "Update Password"}
@@ -331,6 +524,7 @@ export default function ProfilePage() {
             </CardContent>
           </Card>
 
+          {/* Delete account */}
           <Card className="border-destructive/30">
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-destructive">
@@ -345,13 +539,8 @@ export default function ProfilePage() {
 
               <div className="h-px w-full bg-border" />
 
-              {deleteError && (
-                <p className="text-sm text-destructive">{deleteError}</p>
-              )}
-
-              {deleteMessage && (
-                <p className="text-sm text-muted-foreground">{deleteMessage}</p>
-              )}
+              {deleteError && <p className="text-sm text-destructive">{deleteError}</p>}
+              {deleteMessage && <p className="text-sm text-muted-foreground">{deleteMessage}</p>}
 
               <Button
                 type="button"
@@ -363,6 +552,7 @@ export default function ProfilePage() {
               </Button>
             </CardContent>
           </Card>
+
         </div>
       </main>
     </div>
