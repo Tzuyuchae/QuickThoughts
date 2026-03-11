@@ -1,134 +1,123 @@
-"use client"
+"use client";
 
-import { useEffect, useMemo, useRef, useState } from "react"
-import Image from "next/image"
-import { useRouter, useSearchParams } from "next/navigation"
-import { createClient } from "@/lib/supabase/browser"
-import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
-import { Label } from "@/components/ui/label"
-import { Eye, EyeOff, ArrowRight } from "lucide-react"
-import { toast } from "sonner"
-import { DotGridBackground } from "@/components/ui/dot-grid-background"
+import { useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
+import { useRouter, useSearchParams } from "next/navigation";
+import { createClient } from "@/lib/supabase/browser";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Eye, EyeOff, ArrowRight } from "lucide-react";
+import { toast } from "sonner";
+import { DotGridBackground } from "@/components/ui/dot-grid-background";
 
 function getPasswordRequirementError(pw: string) {
-  if (pw.length < 8) return "Password must be at least 8 characters."
-  if (!/[a-z]/.test(pw)) return "Password must include at least 1 lowercase letter."
-  if (!/[A-Z]/.test(pw)) return "Password must include at least 1 uppercase letter."
-  if (!/\d/.test(pw)) return "Password must include at least 1 number."
-  if (!/[!@#$%^&*()_+\-=[\]{};':\"\\|,.<>/?`~]/.test(pw)) {
-    return "Password must include at least 1 special character."
-  }
-  return null
+  if (pw.length < 8) return "Password must be at least 8 characters.";
+  if (!/[a-z]/.test(pw)) return "Password must include at least 1 lowercase letter.";
+  if (!/[A-Z]/.test(pw)) return "Password must include at least 1 uppercase letter.";
+  if (!/\d/.test(pw)) return "Password must include at least 1 number.";
+  if (!/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?`~]/.test(pw))
+    return "Password must include at least 1 special character.";
+  return null;
 }
 
 export default function ResetPasswordPage() {
-  const router = useRouter()
-  const searchParams = useSearchParams()
-  // Stable ref so the effect doesn't re-run on navigation
-  const searchParamsRef = useRef(searchParams)
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const searchParamsRef = useRef(searchParams);
 
-  // Memoised so the client isn't recreated on every render
-  const supabase = useMemo(() => createClient(), [])
+  const supabase = useMemo(() => createClient(), []);
 
-  const [checking, setChecking] = useState(true)
-  const [hasSession, setHasSession] = useState(false)
+  const [checking, setChecking] = useState(true);
+  const [hasSession, setHasSession] = useState(false);
 
-  const [password, setPassword] = useState("")
-  const [confirmPassword, setConfirmPassword] = useState("")
-  const [showPassword, setShowPassword] = useState(false)
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(false);
 
+  // Bootstrap session from reset link code
   useEffect(() => {
-    let mounted = true
-    // Guard so the auth state listener doesn't fire before bootstrap finishes
-    const bootstrapDone = { current: false }
+    let mounted = true;
+    const bootstrapDone = { current: false };
 
     async function bootstrapFromUrl() {
       try {
-        const code = searchParamsRef.current.get("code")
-
+        const code = searchParamsRef.current.get("code");
         if (code) {
-          const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code)
-          if (exchangeError) {
-            console.warn("exchangeCodeForSession error:", exchangeError.message)
+          try {
+            const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
+            if (exchangeError) console.warn("exchangeCodeForSession error:", exchangeError.message);
+          } catch (err) {
+            console.error("Unexpected error exchanging code:", err);
           }
         }
 
-        const { data, error } = await supabase.auth.getSession()
+        const { data, error } = await supabase.auth.getSession();
+        if (!mounted) return;
 
-        if (!mounted) return
-
-        if (error) {
-          setHasSession(false)
-        } else {
-          setHasSession(!!data.session)
-        }
+        setHasSession(!error && !!data.session);
       } finally {
         if (mounted) {
-          bootstrapDone.current = true
-          setChecking(false)
+          bootstrapDone.current = true;
+          setChecking(false);
         }
       }
     }
 
-    bootstrapFromUrl()
+    bootstrapFromUrl();
 
     const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
-      if (!mounted) return
+      if (!mounted) return;
 
-      // Handle the explicit recovery event regardless of bootstrap state
       if (event === "PASSWORD_RECOVERY") {
-        setHasSession(true)
-        setChecking(false)
-        return
+        setHasSession(true);
+        setChecking(false);
+        return;
       }
 
-      // Ignore early fires that arrive before bootstrap has resolved —
-      // bootstrapFromUrl is already handling the initial session check.
-      if (!bootstrapDone.current) return
+      if (!bootstrapDone.current) return;
 
-      setHasSession(!!session)
-      setChecking(false)
-    })
+      setHasSession(!!session);
+      setChecking(false);
+    });
 
     return () => {
-      mounted = false
-      sub.subscription.unsubscribe()
-    }
-  }, [supabase]) // searchParams intentionally omitted — read via ref above
+      mounted = false;
+      sub.subscription.unsubscribe?.();
+    };
+  }, [supabase]);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault()
+    e.preventDefault();
 
-    const pwReqError = getPasswordRequirementError(password)
+    const pwReqError = getPasswordRequirementError(password);
     if (pwReqError) {
-      toast.error(pwReqError)
-      return
+      if (typeof window !== "undefined") toast.error(pwReqError);
+      return;
     }
 
     if (password !== confirmPassword) {
-      toast.error("Passwords do not match.")
-      return
+      if (typeof window !== "undefined") toast.error("Passwords do not match.");
+      return;
     }
 
-    setLoading(true)
+    setLoading(true);
     try {
-      const { error } = await supabase.auth.updateUser({ password })
+      const { error } = await supabase.auth.updateUser({ password });
       if (error) {
-        toast.error(error.message)
-        return
+        if (typeof window !== "undefined") toast.error(error.message);
+        return;
       }
 
-      toast.success("Password updated! Please sign in again.")
-      await supabase.auth.signOut()
+      if (typeof window !== "undefined") toast.success("Password updated! Please sign in again.");
+      await supabase.auth.signOut();
 
-      router.push("/login")
-      router.refresh()
+      router.push("/login");
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
   }
 
@@ -175,8 +164,8 @@ export default function ResetPasswordPage() {
               className="underline underline-offset-4 hover:text-foreground"
             >
               login
-            </button>
-            {" "}and request a new reset email.
+            </button>{" "}
+            and request a new reset email.
           </div>
         ) : (
           <form onSubmit={onSubmit} className="flex w-full flex-col gap-4">
@@ -248,5 +237,5 @@ export default function ResetPasswordPage() {
         )}
       </div>
     </main>
-  )
+  );
 }
