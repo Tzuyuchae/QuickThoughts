@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import Image from "next/image"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -33,9 +33,17 @@ function getPasswordRequirementError(pw: string) {
   return null
 }
 
+/** SSR-safe way to get the current origin. Always returns a string. */
+function getOrigin(): string {
+  if (typeof window !== "undefined") return window.location.origin
+  // Falls back to the env var you should have set in Vercel
+  return process.env.NEXT_PUBLIC_SITE_URL ?? ""
+}
+
 export default function AuthForm({ mode }: AuthFormProps) {
   const router = useRouter()
-  const supabase = createClient()
+  // Memoised so the client isn't recreated on every render
+  const supabase = useMemo(() => createClient(), [])
   const isSignup = mode === "signup"
 
   const [email, setEmail] = useState("")
@@ -83,12 +91,11 @@ export default function AuthForm({ mode }: AuthFormProps) {
 
         setLoading(true)
         try {
-          // Send a 6-digit code email and create user if needed
           const { error } = await supabase.auth.signInWithOtp({
             email: cleanEmail,
             options: {
               shouldCreateUser: true,
-              emailRedirectTo: `${window.location.origin}/auth/callback`,
+              emailRedirectTo: `${getOrigin()}/auth/callback`,
             },
           })
 
@@ -126,10 +133,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
           return
         }
 
-        // After OTP verification, the user is signed in — now set their password
-        const { error: pwError } = await supabase.auth.updateUser({
-          password,
-        })
+        const { error: pwError } = await supabase.auth.updateUser({ password })
 
         if (pwError) {
           toast.error(pwError.message)
@@ -174,7 +178,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
         email: email.trim(),
         options: {
           shouldCreateUser: true,
-          emailRedirectTo: `${window.location.origin}/auth/callback`,
+          emailRedirectTo: `${getOrigin()}/auth/callback`,
         },
       })
 
@@ -200,7 +204,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
     setLoading(true)
     try {
       const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
-        redirectTo: `${window.location.origin}/reset-password`,
+        redirectTo: `${getOrigin()}/reset-password`,
       })
 
       if (error) {
@@ -223,7 +227,6 @@ export default function AuthForm({ mode }: AuthFormProps) {
     <main className="relative flex min-h-screen w-full flex-col items-center justify-center overflow-hidden bg-background p-4">
       <DotGridBackground />
 
-      {/* Radial glow behind the form */}
       <div
         className="pointer-events-none absolute left-1/2 top-1/2 z-0 -translate-x-1/2 -translate-y-1/2"
         aria-hidden="true"
@@ -234,7 +237,6 @@ export default function AuthForm({ mode }: AuthFormProps) {
       {/* Verification Step */}
       {isSignup && signupStep === "verify" ? (
         <div className="relative z-10 flex w-full max-w-md flex-col items-center px-6">
-          {/* Logo */}
           <div className="mb-10">
             <Image
               src="/images/qtlogo.png"
@@ -246,7 +248,6 @@ export default function AuthForm({ mode }: AuthFormProps) {
             />
           </div>
 
-          {/* Heading */}
           <h1 className="mb-2 text-center font-heading text-4xl font-bold tracking-tight text-foreground text-balance md:text-5xl">
             Verify Your Email
           </h1>
@@ -254,7 +255,6 @@ export default function AuthForm({ mode }: AuthFormProps) {
             We sent a 6-digit code to <strong>{email}</strong>
           </p>
 
-          {/* Verification Form */}
           <form onSubmit={onSubmit} className="flex w-full flex-col gap-4">
             <div className="flex flex-col gap-2">
               <Label htmlFor="code" className="text-sm text-muted-foreground">
@@ -285,7 +285,6 @@ export default function AuthForm({ mode }: AuthFormProps) {
             </Button>
           </form>
 
-          {/* Helper links */}
           <div className="mt-6 flex flex-col gap-2 text-center text-sm">
             <button
               type="button"
@@ -305,7 +304,6 @@ export default function AuthForm({ mode }: AuthFormProps) {
             </button>
           </div>
 
-          {/* Terms */}
           <p className="mt-6 max-w-sm text-center text-xs leading-relaxed text-muted-foreground">
             {"By continuing, you agree to our "}
             <a href="#" className="underline underline-offset-2 transition-colors hover:text-foreground">
@@ -319,9 +317,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
           </p>
         </div>
       ) : (
-        /* Login/Signup Form */
         <div className="relative z-10 flex w-full max-w-md flex-col items-center px-6">
-          {/* Logo */}
           <div className="mb-10">
             <Image
               src="/images/qtlogo.png"
@@ -333,7 +329,6 @@ export default function AuthForm({ mode }: AuthFormProps) {
             />
           </div>
 
-          {/* Heading */}
           <h1 className="mb-2 text-center font-heading text-4xl font-bold tracking-tight text-foreground text-balance md:text-5xl">
             {isSignup ? "Get Started" : "Welcome Back"}
           </h1>
@@ -343,7 +338,6 @@ export default function AuthForm({ mode }: AuthFormProps) {
               : "Sign in to access your voice memos and transcriptions"}
           </p>
 
-          {/* Form */}
           <form onSubmit={onSubmit} className="flex w-full flex-col gap-4">
             <div className="flex flex-col gap-2">
               <Label htmlFor="email" className="text-sm text-muted-foreground">
@@ -382,11 +376,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
                   aria-label={showPassword ? "Hide password" : "Show password"}
                 >
-                  {showPassword ? (
-                    <EyeOff className="size-4" />
-                  ) : (
-                    <Eye className="size-4" />
-                  )}
+                  {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                 </button>
               </div>
               {isSignup && (
@@ -428,11 +418,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
                     aria-label={showConfirmPassword ? "Hide password" : "Show password"}
                   >
-                    {showConfirmPassword ? (
-                      <EyeOff className="size-4" />
-                    ) : (
-                      <Eye className="size-4" />
-                    )}
+                    {showConfirmPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                   </button>
                 </div>
               </div>
@@ -457,7 +443,6 @@ export default function AuthForm({ mode }: AuthFormProps) {
             </Button>
           </form>
 
-          {/* Mode toggle */}
           <p className="mt-8 text-sm text-muted-foreground">
             {isSignup ? "Already have an account? " : "New to Quick Thoughts? "}
             <Link
@@ -468,7 +453,6 @@ export default function AuthForm({ mode }: AuthFormProps) {
             </Link>
           </p>
 
-          {/* Terms */}
           <p className="mt-6 max-w-sm text-center text-xs leading-relaxed text-muted-foreground">
             {"By continuing, you agree to our "}
             <a href="#" className="underline underline-offset-2 transition-colors hover:text-foreground">
