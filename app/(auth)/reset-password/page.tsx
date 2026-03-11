@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/browser";
@@ -21,7 +21,7 @@ function getPasswordRequirementError(pw: string) {
   return null;
 }
 
-export default function ResetPasswordPage() {
+function ResetPasswordPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const searchParamsRef = useRef(searchParams);
@@ -237,5 +237,22 @@ export default function ResetPasswordPage() {
         )}
       </div>
     </main>
+  );
+}
+
+export default function ResetPasswordPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="relative flex min-h-screen w-full flex-col items-center justify-center overflow-hidden bg-background p-4">
+          <DotGridBackground />
+          <div className="relative z-10 w-full max-w-md rounded-2xl border border-border bg-secondary/40 p-4 text-sm text-muted-foreground">
+            Checking reset link...
+          </div>
+        </main>
+      }
+    >
+      <ResetPasswordPageContent />
+    </Suspense>
   );
 }
