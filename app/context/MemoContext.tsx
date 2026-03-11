@@ -8,7 +8,6 @@
 
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/browser";
-import { error } from "console";
 
 export type MemoStatus = "ready" | "classifying" | "error";
 

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import Image from "next/image"
 import { useRouter, useSearchParams } from "next/navigation"
 import { createClient } from "@/lib/supabase/browser"
@@ -25,7 +25,11 @@ function getPasswordRequirementError(pw: string) {
 export default function ResetPasswordPage() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const supabase = createClient()
+  // Stable ref so the effect doesn't re-run on navigation
+  const searchParamsRef = useRef(searchParams)
+
+  // Memoised so the client isn't recreated on every render
+  const supabase = useMemo(() => createClient(), [])
 
   const [checking, setChecking] = useState(true)
   const [hasSession, setHasSession] = useState(false)
@@ -39,17 +43,16 @@ export default function ResetPasswordPage() {
 
   useEffect(() => {
     let mounted = true
+    // Guard so the auth state listener doesn't fire before bootstrap finishes
+    const bootstrapDone = { current: false }
 
     async function bootstrapFromUrl() {
       try {
-        // Supabase recovery links often include a PKCE `code` (query param) or tokens in the hash.
-        // Exchanging the `code` makes the session available for `updateUser`.
-        const code = searchParams.get("code")
+        const code = searchParamsRef.current.get("code")
 
         if (code) {
           const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code)
           if (exchangeError) {
-            // If exchange fails we still continue to session check below.
             console.warn("exchangeCodeForSession error:", exchangeError.message)
           }
         }
@@ -64,14 +67,29 @@ export default function ResetPasswordPage() {
           setHasSession(!!data.session)
         }
       } finally {
-        if (mounted) setChecking(false)
+        if (mounted) {
+          bootstrapDone.current = true
+          setChecking(false)
+        }
       }
     }
 
     bootstrapFromUrl()
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
       if (!mounted) return
+
+      // Handle the explicit recovery event regardless of bootstrap state
+      if (event === "PASSWORD_RECOVERY") {
+        setHasSession(true)
+        setChecking(false)
+        return
+      }
+
+      // Ignore early fires that arrive before bootstrap has resolved —
+      // bootstrapFromUrl is already handling the initial session check.
+      if (!bootstrapDone.current) return
+
       setHasSession(!!session)
       setChecking(false)
     })
@@ -80,7 +98,7 @@ export default function ResetPasswordPage() {
       mounted = false
       sub.subscription.unsubscribe()
     }
-  }, [supabase, searchParams])
+  }, [supabase]) // searchParams intentionally omitted — read via ref above
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -150,7 +168,7 @@ export default function ResetPasswordPage() {
           </div>
         ) : !hasSession ? (
           <div className="w-full rounded-2xl border border-border bg-secondary/40 p-4 text-sm text-muted-foreground">
-            This reset link is invalid or expired. Please go back to {" "}
+            This reset link is invalid or expired. Please go back to{" "}
             <button
               type="button"
               onClick={() => router.push("/login")}
