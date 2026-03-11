@@ -5,7 +5,7 @@
  
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { useRouter } from "next/navigation"
 import { createClient } from "@/lib/supabase/browser"
 import { Navbar } from "@/components/ui/navbar"
@@ -21,7 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Calendar, Search, Filter, MoreVertical, Trash2, Mic, Folder } from "lucide-react"
+import { Calendar, Search, Filter, MoreVertical, Trash2, Mic, Folder, Pencil, Plus } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -46,16 +46,181 @@ export default function MemosPage() {
   const [editFolder, setEditFolder] = useState("Unsorted")
   const [editTranscription, setEditTranscription] = useState("")
 
-  const categories = [
-    "all",
-    ...Array.from(
-      new Set([
-        "Unsorted",
-        ...folders.map((f) => f.name),
-        ...memos.map((m) => m.category).filter(Boolean) as string[],
-      ])
-    ),
-  ]
+  const [newFolderName, setNewFolderName] = useState("")
+  const [folderActionLoading, setFolderActionLoading] = useState(false)
+  const [folderMessage, setFolderMessage] = useState<string | null>(null)
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null)
+  const [editingFolderName, setEditingFolderName] = useState("")
+
+  const categories = useMemo(
+    () => [
+      "all",
+      ...Array.from(
+        new Set([
+          "Unsorted",
+          ...folders.map((f) => f.name),
+          ...(memos.map((m) => m.category).filter(Boolean) as string[]),
+        ])
+      ),
+    ],
+    [folders, memos]
+  )
+  async function createFolder() {
+    const trimmed = newFolderName.trim()
+    if (!trimmed) {
+      setFolderMessage("Enter a folder name first.")
+      return
+    }
+
+    const alreadyExists = folders.some(
+      (folder) => folder.name.toLowerCase() === trimmed.toLowerCase()
+    )
+    if (alreadyExists || trimmed.toLowerCase() === "unsorted") {
+      setFolderMessage("That folder name already exists.")
+      return
+    }
+
+    setFolderActionLoading(true)
+    setFolderMessage(null)
+
+    const { data, error } = await supabase.auth.getUser()
+    const user = data?.user
+
+    if (!user || error) {
+      setFolderActionLoading(false)
+      setFolderMessage("You must be logged in to create a folder.")
+      return
+    }
+
+    const { data: inserted, error: insertError } = await supabase
+      .from("folders")
+      .insert({
+        user_id: user.id,
+        name: trimmed,
+      })
+      .select("id,name")
+      .single()
+
+    setFolderActionLoading(false)
+
+    if (insertError || !inserted) {
+      setFolderMessage("Could not create folder.")
+      return
+    }
+
+    setFolders((prev) => [...prev, inserted as { id: string; name: string }])
+    setNewFolderName("")
+    setFolderMessage(`Created folder \"${trimmed}\".`)
+  }
+
+  async function saveFolderRename() {
+    const trimmed = editingFolderName.trim()
+    if (!editingFolderId) return
+
+    if (!trimmed) {
+      setFolderMessage("Folder name cannot be empty.")
+      return
+    }
+
+    const duplicate = folders.some(
+      (folder) =>
+        folder.id !== editingFolderId &&
+        folder.name.toLowerCase() === trimmed.toLowerCase()
+    )
+    if (duplicate || trimmed.toLowerCase() === "unsorted") {
+      setFolderMessage("That folder name already exists.")
+      return
+    }
+
+    setFolderActionLoading(true)
+    setFolderMessage(null)
+
+    const originalFolder = folders.find((folder) => folder.id === editingFolderId)
+
+    const { error } = await supabase
+      .from("folders")
+      .update({ name: trimmed })
+      .eq("id", editingFolderId)
+
+    setFolderActionLoading(false)
+
+    if (error) {
+      setFolderMessage("Could not rename folder.")
+      return
+    }
+
+    setFolders((prev) =>
+      prev.map((folder) =>
+        folder.id === editingFolderId ? { ...folder, name: trimmed } : folder
+      )
+    )
+
+    if (selectedCategory === originalFolder?.name) {
+      setSelectedCategory(trimmed)
+    }
+
+    if (editFolder === originalFolder?.name) {
+      setEditFolder(trimmed)
+    }
+
+    setEditingFolderId(null)
+    setEditingFolderName("")
+    setFolderMessage("Folder renamed.")
+  }
+
+  async function deleteFolder(folderId: string, folderName: string) {
+    if (!window.confirm(`Delete folder \"${folderName}\"? Memos inside it will be moved to Unsorted.`)) {
+      return
+    }
+
+    setFolderActionLoading(true)
+    setFolderMessage(null)
+
+    const { data, error } = await supabase.auth.getUser()
+    const user = data?.user
+
+    if (!user || error) {
+      setFolderActionLoading(false)
+      setFolderMessage("You must be logged in to delete a folder.")
+      return
+    }
+
+    const { error: memoUpdateError } = await supabase
+      .from("memos")
+      .update({ folder_id: null })
+      .eq("user_id", user.id)
+      .eq("folder_id", folderId)
+
+    if (memoUpdateError) {
+      setFolderActionLoading(false)
+      setFolderMessage("Could not move memos out of that folder.")
+      return
+    }
+
+    const { error: deleteError } = await supabase
+      .from("folders")
+      .delete()
+      .eq("id", folderId)
+
+    setFolderActionLoading(false)
+
+    if (deleteError) {
+      setFolderMessage("Could not delete folder.")
+      return
+    }
+
+    setFolders((prev) => prev.filter((folder) => folder.id !== folderId))
+
+    if (selectedCategory === folderName) {
+      setSelectedCategory("all")
+    }
+
+    if (editFolder === folderName) {
+      setEditFolder("Unsorted")
+    }
+
+    setFolderMessage("Folder deleted. Memos from that folder are now Unsorted.")
+  }
 
   useEffect(() => {
     let mounted = true
@@ -144,6 +309,100 @@ export default function MemosPage() {
                 Loading your folders…
               </p>
             )}
+          </div>
+
+          <div className="mb-6 rounded-2xl border border-border bg-secondary/20 p-4 space-y-4">
+            <div className="flex items-center gap-2">
+              <Folder className="size-4 text-accent" />
+              <h2 className="text-sm font-semibold text-foreground">Manage folders</h2>
+            </div>
+
+            <div className="flex flex-col md:flex-row gap-3">
+              <Input
+                placeholder="New folder name"
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+                className="h-10 rounded-xl border-border bg-secondary/40"
+              />
+              <Button
+                type="button"
+                className="rounded-xl"
+                disabled={folderActionLoading}
+                onClick={createFolder}
+              >
+                <Plus className="size-4 mr-2" />
+                Add Folder
+              </Button>
+            </div>
+
+            {folderMessage && (
+              <p className="text-xs text-muted-foreground">{folderMessage}</p>
+            )}
+
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="outline" className="rounded-full px-3 py-1 border-accent/40 text-accent">
+                Unsorted
+              </Badge>
+              {folders.map((folder) => (
+                <div
+                  key={folder.id}
+                  className="flex items-center gap-2 rounded-full border border-border bg-background/50 px-3 py-1.5"
+                >
+                  {editingFolderId === folder.id ? (
+                    <>
+                      <Input
+                        value={editingFolderName}
+                        onChange={(e) => setEditingFolderName(e.target.value)}
+                        className="h-8 w-[150px]"
+                      />
+                      <Button
+                        size="sm"
+                        className="h-8 rounded-full px-3"
+                        disabled={folderActionLoading}
+                        onClick={saveFolderRename}
+                      >
+                        Save
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="h-8 rounded-full px-3"
+                        onClick={() => {
+                          setEditingFolderId(null)
+                          setEditingFolderName("")
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-sm text-foreground">{folder.name}</span>
+                      <button
+                        type="button"
+                        className="inline-flex items-center justify-center rounded-full p-1 text-muted-foreground hover:text-foreground"
+                        onClick={() => {
+                          setEditingFolderId(folder.id)
+                          setEditingFolderName(folder.name)
+                          setFolderMessage(null)
+                        }}
+                        aria-label={`Rename ${folder.name}`}
+                      >
+                        <Pencil className="size-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex items-center justify-center rounded-full p-1 text-muted-foreground hover:text-destructive"
+                        onClick={() => deleteFolder(folder.id, folder.name)}
+                        aria-label={`Delete ${folder.name}`}
+                      >
+                        <Trash2 className="size-3.5" />
+                      </button>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
 
           {/* Search and Filter */}
@@ -286,6 +545,7 @@ export default function MemosPage() {
                             updateMemo(memo.id, {
                               title: editTitle.trim() || "Voice Memo",
                               category: editFolder,
+                              transcription: editTranscription,
                               content: editTranscription,
                             })
                             setEditingId(null)

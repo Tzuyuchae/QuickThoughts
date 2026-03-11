@@ -135,20 +135,42 @@ function OnboardingForm() {
         return
       }
 
-      // Always ensure "Unsorted" exists (not shown during onboarding)
-      const foldersToInsert = Array.from(new Set(["Unsorted", ...chosenFolders]))
-
-      const { error: folderErr } = await supabase.from("folders").insert(
-        foldersToInsert.map((name) => ({
-          user_id: user.id,
-          name,
-        }))
+      // Always ensure "Unsorted" exists exactly once, and never insert duplicate folder names
+      const desiredFolders = Array.from(
+        new Set(
+          ["Unsorted", ...chosenFolders]
+            .map((name) => name.trim())
+            .filter(Boolean)
+        )
       )
 
-      if (folderErr) {
-        // If user refreshes and tries again, it may complain about duplicates
-        const msg = folderErr.message.toLowerCase()
-        if (!msg.includes("duplicate") && !msg.includes("unique")) {
+      const { data: existingFolders, error: existingFoldersErr } = await supabase
+        .from("folders")
+        .select("name")
+        .eq("user_id", user.id)
+
+      if (existingFoldersErr) {
+        toast.error(existingFoldersErr.message)
+        return
+      }
+
+      const existingNames = new Set(
+        (existingFolders ?? []).map((folder) => folder.name.trim().toLowerCase())
+      )
+
+      const foldersToInsert = desiredFolders.filter(
+        (name) => !existingNames.has(name.toLowerCase())
+      )
+
+      if (foldersToInsert.length > 0) {
+        const { error: folderErr } = await supabase.from("folders").insert(
+          foldersToInsert.map((name) => ({
+            user_id: user.id,
+            name,
+          }))
+        )
+
+        if (folderErr) {
           toast.error(folderErr.message)
           return
         }
