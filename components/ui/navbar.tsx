@@ -12,7 +12,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Home, FolderOpen, User, LogOut, Menu, X, Calendar } from "lucide-react"
+import { Home, FolderOpen, User, LogOut, Menu, X, Calendar, Mail } from "lucide-react"
 import Link from "next/link"
 import Image from "next/image"
 
@@ -130,6 +130,19 @@ export function Navbar() {
                   <User className="mr-2 h-4 w-4" />
                   Profile
                 </DropdownMenuItem>
+
+                {/* CONTACT US BUTTON UNDER PROFILE */}
+                <DropdownMenuItem
+                  className="rounded-lg cursor-pointer"
+                  onClick={() => {
+                    setMobileMenuOpen(false)
+                    router.push("/contact")
+                  }}
+                >
+                  <Mail className="mr-2 h-4 w-4" />
+                  Contact Us / Feedback
+                </DropdownMenuItem>
+
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   className="text-destructive focus:text-destructive rounded-lg cursor-pointer"
@@ -168,6 +181,17 @@ export function Navbar() {
                   </Button>
                 </Link>
               ))}
+
+              {/* Mobile Contact Us */}
+              <Link href="/contact" onClick={() => setMobileMenuOpen(false)}>
+                <Button
+                  variant="secondary"
+                  className="w-full justify-start gap-3 rounded-xl"
+                >
+                  <Mail className="h-4 w-4" />
+                  Contact Us / Feedback
+                </Button>
+              </Link>
             </div>
           </div>
         )}
