@@ -4,19 +4,68 @@ import { createClient } from '@/lib/supabase/server';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
+const DAILY_LIMIT = 10;
+
+// ---------------------------------------------------------------------------
+// Rate limit helpers
+// ---------------------------------------------------------------------------
+
+async function checkAndIncrementRateLimit(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string
+): Promise<{ limited: boolean; count: number }> {
+  const today = new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+
+  const { data: existing, error: fetchErr } = await supabase
+    .from('gemini_usage')
+    .select('call_count')
+    .eq('user_id', userId)
+    .eq('usage_date', today)
+    .maybeSingle();
+
+  if (fetchErr) {
+    // Fail open — don't block the user for a DB hiccup
+    console.error('rate limit fetch error:', fetchErr);
+    return { limited: false, count: 0 };
+  }
+
+  const currentCount = existing?.call_count ?? 0;
+
+  if (currentCount >= DAILY_LIMIT) {
+    return { limited: true, count: currentCount };
+  }
+
+  const { error: upsertErr } = await supabase.from('gemini_usage').upsert(
+    {
+      user_id: userId,
+      usage_date: today,
+      call_count: currentCount + 1,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'user_id,usage_date' }
+  );
+
+  if (upsertErr) {
+    console.error('rate limit upsert error:', upsertErr);
+    return { limited: false, count: currentCount };
+  }
+
+  return { limited: false, count: currentCount + 1 };
+}
+
+// ---------------------------------------------------------------------------
+// POST handler
+// ---------------------------------------------------------------------------
+
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
     const audioFile = formData.get('audio') as File;
 
-    // Browser's IANA timezone and UTC offset — both sent from the client so we
-    // never have to derive them server-side (server timezone != user timezone).
     const userTimezone = (formData.get('timezone') as string | null) || 'UTC';
-    // timezoneOffset is JS getTimezoneOffset() — minutes BEHIND UTC, e.g. 360 for UTC-6
-    // We convert it to an ISO offset string like "-06:00"
     const rawOffsetMins = parseInt(formData.get('timezoneOffset') as string ?? '0', 10);
     const userOffsetString = (() => {
-      const totalMins = -rawOffsetMins; // flip sign: JS is inverted
+      const totalMins = -rawOffsetMins;
       const sign = totalMins >= 0 ? '+' : '-';
       const abs = Math.abs(totalMins);
       const hours = String(Math.floor(abs / 60)).padStart(2, '0');
@@ -33,6 +82,21 @@ export async function POST(request: NextRequest) {
 
     if (userErr || !user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Rate limit check — happens before any Gemini work
+    const { limited, count } = await checkAndIncrementRateLimit(supabase, user.id);
+
+    if (limited) {
+      return NextResponse.json(
+        {
+          error: `Daily AI limit of ${DAILY_LIMIT} uses reached. Try again tomorrow.`,
+          rateLimited: true,
+          count,
+          limit: DAILY_LIMIT,
+        },
+        { status: 429 }
+      );
     }
 
     const { data: folders, error: foldersErr } = await supabase
@@ -59,7 +123,6 @@ export async function POST(request: NextRequest) {
 
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
-    // Build a human-readable local time string for the user's timezone
     const nowLocal = new Date().toLocaleString('en-US', {
       timeZone: userTimezone,
       year: 'numeric',
@@ -70,11 +133,6 @@ export async function POST(request: NextRequest) {
       hour12: false,
     });
 
-    // userOffsetString is now derived from client-sent timezoneOffset above
-
-    // Build prompt — keep the JSON schema as plain text descriptions, NOT as
-    // a literal JSON block with unquoted values, which causes Gemini to echo
-    // back invalid JSON with unquoted property values.
     const exampleTs = `2025-03-15T09:00:00${userOffsetString}`;
 
     const prompt = [
@@ -108,10 +166,7 @@ export async function POST(request: NextRequest) {
     ]);
 
     const raw = result.response.text();
-
-    // Strip any accidental markdown fences
     const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-
     const parsedData = JSON.parse(cleaned);
 
     const transcription = String(parsedData?.transcription ?? '').trim();
@@ -127,7 +182,7 @@ export async function POST(request: NextRequest) {
         if (t?.reminder_at && typeof t.reminder_at === 'string') {
           const parsed = new Date(t.reminder_at);
           if (!isNaN(parsed.getTime())) {
-            reminder_at = t.reminder_at; // keep offset-aware string, don't convert to UTC
+            reminder_at = t.reminder_at;
           }
         }
 

@@ -3,7 +3,7 @@
  * Handles recording audio and uploading files to save them to the global list.
  * Features:
  *   - Voice-to-text only mode (uses Web Speech API, bypasses Gemini)
- *   - Rate limiting: max 10 Gemini calls per day (resets at midnight)
+ *   - Rate limiting: max 10 Gemini calls per day (enforced server-side in DB, resets at midnight)
  *   - Post-recording folder selection + memo title naming with confirmation
  *
  * Mobile fix for Voice-to-Text Only mode:
@@ -51,47 +51,9 @@ import {
 } from "@/components/ui/select"
 
 // ---------------------------------------------------------------------------
-// Rate-limit helpers (localStorage, resets daily)
+// Constants
 // ---------------------------------------------------------------------------
-const RATE_LIMIT_KEY = "gemini_rate_limit"
 const DAILY_LIMIT = 10
-
-interface RateLimitRecord {
-  date: string // "YYYY-MM-DD"
-  count: number
-}
-
-function getTodayString(): string {
-  return new Date().toISOString().slice(0, 10)
-}
-
-function getRateLimitRecord(): RateLimitRecord {
-  try {
-    const raw = localStorage.getItem(RATE_LIMIT_KEY)
-    if (raw) {
-      const parsed: RateLimitRecord = JSON.parse(raw)
-      if (parsed.date === getTodayString()) return parsed
-    }
-  } catch {
-    // ignore
-  }
-  return { date: getTodayString(), count: 0 }
-}
-
-function incrementRateLimit(): RateLimitRecord {
-  const record = getRateLimitRecord()
-  const updated = { date: getTodayString(), count: record.count + 1 }
-  try {
-    localStorage.setItem(RATE_LIMIT_KEY, JSON.stringify(updated))
-  } catch {
-    // ignore
-  }
-  return updated
-}
-
-function isRateLimited(): boolean {
-  return getRateLimitRecord().count >= DAILY_LIMIT
-}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -113,8 +75,9 @@ export default function HomePage() {
   const [memoTitle, setMemoTitle] = useState<string>("")
   const [confirmed, setConfirmed] = useState(false)
 
-  // Rate limit state
+  // Rate limit state — fetched from DB, never from localStorage
   const [rateLimitCount, setRateLimitCount] = useState(0)
+  const [rateLimitLoading, setRateLimitLoading] = useState(true)
 
   const supabase = createClient()
   const [username, setUsername] = useState<string | null>(null)
@@ -129,12 +92,30 @@ export default function HomePage() {
   const isRecordingActiveRef = useRef(false)  // true while user hasn't pressed Stop
   const transcriptRef = useRef("")            // accumulates text across all restarts
 
-  useEffect(() => {
-    setRateLimitCount(getRateLimitRecord().count)
+  // ---------------------------------------------------------------------------
+  // Fetch real rate limit count from the database
+  // ---------------------------------------------------------------------------
+  const fetchRateLimitCount = async () => {
+    try {
+      const res = await fetch("/api/gemini/usage")
+      if (res.ok) {
+        const data = await res.json()
+        setRateLimitCount(data.count ?? 0)
+      }
+    } catch {
+      // If the fetch fails, keep whatever count we have — don't block the UI
+    } finally {
+      setRateLimitLoading(false)
+    }
+  }
 
+  useEffect(() => {
     let mounted = true
 
     ;(async () => {
+      // Fetch rate limit count from DB
+      fetchRateLimitCount()
+
       try {
         const { data: userRes } = await supabase.auth.getUser()
         const user = userRes.user
@@ -300,11 +281,6 @@ export default function HomePage() {
   // Gemini processing
   // ---------------------------------------------------------------------------
   const processAudioWithGemini = async (audioBlob: Blob, fileName?: string) => {
-    if (isRateLimited()) {
-      setError(`Daily AI limit of ${DAILY_LIMIT} uses reached. Switch to Voice-to-Text Only mode or try again tomorrow.`)
-      return
-    }
-
     setIsProcessing(true)
     setError(null)
 
@@ -318,11 +294,20 @@ export default function HomePage() {
 
       if (!response.ok) {
         const errorData = await response.json()
+
+        // If the server says we're rate limited, sync the count to the limit
+        if (response.status === 429) {
+          setRateLimitCount(errorData.count ?? DAILY_LIMIT)
+          throw new Error(errorData.error || `Daily AI limit of ${DAILY_LIMIT} uses reached. Try again tomorrow.`)
+        }
+
         throw new Error(errorData.error || "Failed to process audio")
       }
 
-      const updated = incrementRateLimit()
-      setRateLimitCount(updated.count)
+      // Optimistically bump the local count — we'll also do a fresh fetch
+      // in the background so it stays in sync with the server truth.
+      setRateLimitCount((prev) => Math.min(prev + 1, DAILY_LIMIT))
+      fetchRateLimitCount()
 
       const data = await response.json()
 
@@ -404,7 +389,9 @@ export default function HomePage() {
         return
       }
 
-      if (isRateLimited()) {
+      // Client-side pre-check — avoids starting the mic + sending audio only
+      // to get a 429 back. The server enforces the real limit regardless.
+      if (rateLimitCount >= DAILY_LIMIT) {
         setError(`Daily AI limit of ${DAILY_LIMIT} uses reached. Switch to Voice-to-Text Only mode or try again tomorrow.`)
         return
       }
@@ -546,11 +533,11 @@ export default function HomePage() {
                         Daily AI uses
                       </span>
                       <span className={rateLimitExceeded ? "text-destructive font-semibold" : ""}>
-                        {rateLimitCount} / {DAILY_LIMIT}
+                        {rateLimitLoading ? "…" : `${rateLimitCount} / ${DAILY_LIMIT}`}
                       </span>
                     </div>
                     <Progress
-                      value={rateLimitProgress}
+                      value={rateLimitLoading ? 0 : rateLimitProgress}
                       className={`h-1.5 ${rateLimitExceeded ? "[&>div]:bg-destructive" : ""}`}
                     />
                     {rateLimitExceeded && (
