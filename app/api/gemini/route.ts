@@ -121,7 +121,13 @@ export async function POST(request: NextRequest) {
     const base64Audio = Buffer.from(bytes).toString('base64');
     const mimeType = audioFile.type || 'audio/webm';
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    // UPDATED: Using Gemini 3.1 Flash-Lite with JSON response mode
+    const model = genAI.getGenerativeModel({ 
+      model: 'gemini-3.1-flash-lite-preview',
+      generationConfig: {
+        responseMimeType: "application/json",
+      }
+    });
 
     const nowLocal = new Date().toLocaleString('en-US', {
       timeZone: userTimezone,
@@ -141,7 +147,7 @@ export async function POST(request: NextRequest) {
       `User local time: ${nowLocal}`,
       `User timezone: ${userTimezone} (UTC offset ${userOffsetString})`,
       '',
-      'Respond with ONLY a valid JSON object. No markdown, no code fences, no trailing commas.',
+      'Respond with a valid JSON object. Do not include markdown code fences.',
       'The object must have exactly two keys:',
       '  "transcription" — string, the full transcript.',
       '  "thoughts" — array of objects, each with these four string keys:',
@@ -165,9 +171,9 @@ export async function POST(request: NextRequest) {
       prompt,
     ]);
 
+    // UPDATED: Since we use responseMimeType, we parse the text directly
     const raw = result.response.text();
-    const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-    const parsedData = JSON.parse(cleaned);
+    const parsedData = JSON.parse(raw);
 
     const transcription = String(parsedData?.transcription ?? '').trim();
     const rawThoughts = Array.isArray(parsedData?.thoughts) ? parsedData.thoughts : [];
