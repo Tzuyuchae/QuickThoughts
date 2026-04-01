@@ -11,6 +11,32 @@ import { DotGridBackground } from "@/components/ui/dot-grid-background"
 import Image from "next/image"
 import qtLogo from "@/public/images/qtlogo.png"
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+const MAX_NAME_LENGTH = 100
+const MAX_EMAIL_LENGTH = 254  // RFC 5321 maximum
+const MAX_MESSAGE_LENGTH = 2000
+
+// ─── Sanitization helpers ─────────────────────────────────────────────────────
+
+/** Strips HTML / script tags and trims whitespace to prevent XSS payloads being
+ *  stored and later rendered unsafely by other parts of the app. */
+function sanitizeText(value: string): string {
+  return value
+    .trim()
+    .replace(/<[^>]*>/g, "")          // strip all HTML tags
+    .replace(/javascript:/gi, "")     // strip JS pseudo-protocol
+    .replace(/on\w+\s*=/gi, "")       // strip inline event handlers  e.g. onerror=
+}
+
+/** RFC-5322-inspired email regex – catches the most common invalid formats. */
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
+
+function validateEmail(email: string): boolean {
+  return EMAIL_REGEX.test(email)
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
 export default function ContactPage() {
   const [name, setName] = useState("")
   const [email, setEmail] = useState("")
@@ -19,27 +45,60 @@ export default function ContactPage() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
+  // Client-side validation — mirrors the server-side checks so users get
+  // instant feedback without an extra round-trip.
+  function validate(): string | null {
+    if (!name.trim() || !email.trim() || !message.trim()) {
+      return "Please fill out all fields."
+    }
+    if (name.trim().length > MAX_NAME_LENGTH) {
+      return `Name must be ${MAX_NAME_LENGTH} characters or fewer.`
+    }
+    if (!validateEmail(email.trim())) {
+      return "Please enter a valid email address."
+    }
+    if (email.trim().length > MAX_EMAIL_LENGTH) {
+      return "Email address is too long."
+    }
+    if (message.trim().length > MAX_MESSAGE_LENGTH) {
+      return `Message must be ${MAX_MESSAGE_LENGTH} characters or fewer.`
+    }
+    return null
+  }
+
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     setSuccessMessage(null)
     setErrorMessage(null)
 
-    if (!name || !email || !message) {
-      setErrorMessage("Please fill out all fields.")
+    const validationError = validate()
+    if (validationError) {
+      setErrorMessage(validationError)
       return
     }
+
+    // Sanitize before sending so the payload reaching the server is already clean.
+    const sanitizedName    = sanitizeText(name)
+    const sanitizedEmail   = sanitizeText(email)
+    const sanitizedMessage = sanitizeText(message)
 
     setLoading(true)
     try {
       const response = await fetch("/api/contact", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, message }),
+        body: JSON.stringify({
+          name:    sanitizedName,
+          email:   sanitizedEmail,
+          message: sanitizedMessage,
+        }),
       })
 
       const result = await response.json().catch(() => null)
 
-      if (!response.ok) {
+      if (response.status === 429) {
+        setErrorMessage("Too many requests. Please wait a moment and try again.")
+      } else if (!response.ok) {
         setErrorMessage(result?.error || "Failed to send your message.")
       } else {
         setName("")
@@ -81,9 +140,9 @@ export default function ContactPage() {
           />
         </div>
 
-        {/* Professional prompt under logo */}
+        {/* Prompt */}
         <p className="mb-8 text-center text-muted-foreground max-w-md text-white text-accent text-lg">
-          Have a question or want to give us some feedback? We’re happy to hear from you!
+          Have a question or want to give us some feedback? We're happy to hear from you!
         </p>
 
         <Card className="w-full max-w-lg border-2 border-border bg-secondary/20">
@@ -98,7 +157,7 @@ export default function ContactPage() {
           </CardHeader>
 
           <CardContent className="space-y-4">
-            <form onSubmit={handleSubmit} className="space-y-4">
+            <form onSubmit={handleSubmit} className="space-y-4" noValidate>
               {/* Name */}
               <div className="space-y-1">
                 <Label htmlFor="name" className="flex items-center gap-2">
@@ -111,6 +170,8 @@ export default function ContactPage() {
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Your full name"
+                  maxLength={MAX_NAME_LENGTH}
+                  autoComplete="name"
                 />
               </div>
 
@@ -126,6 +187,8 @@ export default function ContactPage() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@example.com"
+                  maxLength={MAX_EMAIL_LENGTH}
+                  autoComplete="email"
                 />
               </div>
 
@@ -141,19 +204,24 @@ export default function ContactPage() {
                   onChange={(e) => setMessage(e.target.value)}
                   placeholder="Write your message here..."
                   rows={5}
+                  maxLength={MAX_MESSAGE_LENGTH}
                   className="w-full rounded-md border bg-transparent px-3 py-2 text-sm"
                 />
+                {/* Live character counter */}
+                <p className="text-xs text-muted-foreground text-right">
+                  {message.length}/{MAX_MESSAGE_LENGTH}
+                </p>
               </div>
 
               {/* Error / Success */}
               {errorMessage && (
-                <div className="flex items-center gap-2 text-destructive text-sm">
+                <div className="flex items-center gap-2 text-destructive text-sm" role="alert">
                   <AlertTriangle className="h-4 w-4" />
                   {errorMessage}
                 </div>
               )}
               {successMessage && (
-                <div className="flex items-center gap-2 text-emerald-600 text-sm">
+                <div className="flex items-center gap-2 text-emerald-600 text-sm" role="status">
                   <CheckCircle2 className="h-4 w-4" />
                   {successMessage}
                 </div>
