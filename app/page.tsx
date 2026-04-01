@@ -5,6 +5,7 @@
  *   - Voice-to-text only mode (uses Web Speech API, bypasses Gemini)
  *   - Rate limiting: max 10 Gemini calls per day (enforced server-side in DB, resets at midnight)
  *   - Post-recording folder selection + memo title naming with confirmation
+ *   - Empty/silent memo prevention: guards in voice-only, AI, and confirm paths
  *
  * Mobile fix for Voice-to-Text Only mode:
  *   continuous=true  → holds a persistent connection to Google's speech servers
@@ -55,6 +56,36 @@ import {
 // ---------------------------------------------------------------------------
 const DAILY_LIMIT = 10
 
+// Minimum meaningful transcript length — filters out stray sounds like "um",
+// "uh", a single word, etc. that the speech API picks up as speech.
+const MIN_TRANSCRIPT_LENGTH = 3
+
+// Minimum audio blob size in bytes before we bother sending to Gemini.
+// A real utterance at webm/opus quality is always several KB; anything smaller
+// is effectively silence or mic noise.
+// NOTE: The API route enforces this same check server-side — this is a
+// client-side fast-path to avoid the round trip entirely.
+const MIN_AUDIO_BYTES = 1500
+
+// Minimum recording duration in seconds before we allow sending to Gemini.
+// This catches the case where a user taps Start then immediately taps Stop
+// before making any sound — the blob may technically exceed MIN_AUDIO_BYTES
+// (because webm headers are included) but contain no real audio data.
+const MIN_RECORDING_SECONDS = 2
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Returns true when a transcript contains enough real words to be worth saving. */
+function isTranscriptMeaningful(text: string): boolean {
+  const trimmed = text.trim()
+  if (trimmed.length < MIN_TRANSCRIPT_LENGTH) return false
+  // Must have at least one word longer than 1 character
+  const words = trimmed.split(/\s+/).filter((w) => w.length > 1)
+  return words.length >= 1
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -91,6 +122,8 @@ export default function HomePage() {
   // Used inside SpeechRecognition callbacks — refs prevent stale closure issues
   const isRecordingActiveRef = useRef(false)  // true while user hasn't pressed Stop
   const transcriptRef = useRef("")            // accumulates text across all restarts
+  // Tracks actual wall-clock recording duration for the pre-Gemini duration guard
+  const recordingStartTimeRef = useRef<number>(0)
 
   // ---------------------------------------------------------------------------
   // Fetch real rate limit count from the database
@@ -113,7 +146,6 @@ export default function HomePage() {
     let mounted = true
 
     ;(async () => {
-      // Fetch rate limit count from DB
       fetchRateLimitCount()
 
       try {
@@ -133,7 +165,6 @@ export default function HomePage() {
         if (!mounted) return
 
         setUsername(profile?.username ?? null)
-        // Filter out any folder literally named "Unsorted" to prevent duplicates
         const nextFolders = ((folderRows ?? []) as Array<{ id: string; name: string }>).filter(
           (f) => f.name.toLowerCase() !== "unsorted"
         )
@@ -157,14 +188,7 @@ export default function HomePage() {
   }, [])
 
   // ---------------------------------------------------------------------------
-  // Create and attach a fresh SpeechRecognition instance.
-  // Called once on start, then again on each auto-restart.
-  //
-  // Why continuous=false + restart instead of continuous=true:
-  //   continuous=true holds a persistent socket to Google's speech servers.
-  //   Android Chrome's battery/service manager kills persistent connections,
-  //   producing "service-not-allowed". continuous=false makes one-shot requests
-  //   per utterance — each is its own short request, nothing to kill.
+  // SpeechRecognition — continuous=false + restart strategy (see file header)
   // ---------------------------------------------------------------------------
   const attachRecognition = () => {
     const SpeechRecognition =
@@ -174,7 +198,7 @@ export default function HomePage() {
     recognitionRef.current = recognition
 
     recognition.lang = "en-US"
-    recognition.continuous = false       // ← KEY: one-shot per utterance
+    recognition.continuous = false
     recognition.interimResults = false
     recognition.maxAlternatives = 1
 
@@ -187,8 +211,6 @@ export default function HomePage() {
     }
 
     recognition.onerror = (event: any) => {
-      // no-speech is benign with continuous=false — it means a quiet moment.
-      // Restart silently and keep listening.
       if (event.error === "no-speech") {
         if (isRecordingActiveRef.current) {
           try { attachRecognition() } catch { /* ignore */ }
@@ -196,7 +218,6 @@ export default function HomePage() {
         return
       }
 
-      // All other errors are fatal
       isRecordingActiveRef.current = false
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
       if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
@@ -214,23 +235,28 @@ export default function HomePage() {
     }
 
     recognition.onend = () => {
-      // With continuous=false, onend fires after every utterance.
-      // If user is still recording, restart immediately to keep listening.
       if (isRecordingActiveRef.current) {
         try { attachRecognition() } catch { /* ignore */ }
         return
       }
 
-      // User pressed Stop — finalize
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
       if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
 
       const finalText = transcriptRef.current.trim()
-      if (finalText) {
-        setPendingTranscript(finalText)
-      } else {
-        setError("No speech detected. Please try again.")
+
+      if (!finalText || !isTranscriptMeaningful(finalText)) {
+        setError(
+          finalText.length > 0
+            ? "Recording was too short or unclear. Please speak for longer and try again."
+            : "No speech detected. Please try again."
+        )
+        setRecording(false)
+        setRecordingTime(0)
+        return
       }
+
+      setPendingTranscript(finalText)
       setRecording(false)
       setRecordingTime(0)
     }
@@ -243,6 +269,12 @@ export default function HomePage() {
   // ---------------------------------------------------------------------------
   const confirmAndSaveMemo = () => {
     if (!pendingTranscript) return
+
+    if (!isTranscriptMeaningful(pendingTranscript)) {
+      setError("Transcript appears to be empty. Please record again.")
+      discardPendingMemo()
+      return
+    }
 
     const dateLabel = new Date().toLocaleDateString("en-US", {
       month: "short",
@@ -280,7 +312,25 @@ export default function HomePage() {
   // ---------------------------------------------------------------------------
   // Gemini processing
   // ---------------------------------------------------------------------------
-  const processAudioWithGemini = async (audioBlob: Blob, fileName?: string) => {
+  const processAudioWithGemini = async (audioBlob: Blob, durationSeconds: number, fileName?: string) => {
+    // ── Guard 1: minimum duration ────────────────────────────────────────────
+    // Catches tap-start-tap-stop with no speech. The webm container headers
+    // alone can push a silent blob past MIN_AUDIO_BYTES, so we check time too.
+    if (durationSeconds < MIN_RECORDING_SECONDS) {
+      setError("Recording was too short. Please hold the button and speak, then tap Stop.")
+      setRecording(false)
+      setRecordingTime(0)
+      return
+    }
+
+    // ── Guard 2: minimum blob size ───────────────────────────────────────────
+    if (audioBlob.size < MIN_AUDIO_BYTES) {
+      setError("Recording was too short or silent. Please speak clearly and try again.")
+      setRecording(false)
+      setRecordingTime(0)
+      return
+    }
+
     setIsProcessing(true)
     setError(null)
 
@@ -295,27 +345,31 @@ export default function HomePage() {
       if (!response.ok) {
         const errorData = await response.json()
 
-        // If the server says we're rate limited, sync the count to the limit
         if (response.status === 429) {
           setRateLimitCount(errorData.count ?? DAILY_LIMIT)
           throw new Error(errorData.error || `Daily AI limit of ${DAILY_LIMIT} uses reached. Try again tomorrow.`)
         }
 
+        if (response.status === 422 && errorData.noContent) {
+          // Server confirmed no real speech — count was NOT incremented.
+          // Re-fetch to keep the displayed count in sync with the DB.
+          await fetchRateLimitCount()
+          throw new Error(errorData.error || "No speech detected. This has not been counted against your daily limit.")
+        }
+
         throw new Error(errorData.error || "Failed to process audio")
       }
 
-      // Optimistically bump the local count — we'll also do a fresh fetch
-      // in the background so it stays in sync with the server truth.
+      const data = await response.json()
+
+      // Server validated content and incremented the counter before returning 200.
+      // Bump local display count and background-sync with DB truth.
       setRateLimitCount((prev) => Math.min(prev + 1, DAILY_LIMIT))
       fetchRateLimitCount()
 
-      const data = await response.json()
-
-      const dateLabel = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })
-
-      const thoughts: Array<{ text: string; label?: string; folder?: string; reminder_at?: string | null }> = Array.isArray(data?.thoughts)
-        ? data.thoughts
-        : []
+      const rawTranscription = String(data?.transcription ?? "").trim()
+      const thoughts: Array<{ text: string; label?: string; folder?: string; reminder_at?: string | null }> =
+        Array.isArray(data?.thoughts) ? data.thoughts : []
 
       const safeThoughts = thoughts
         .map((t) => ({
@@ -324,8 +378,10 @@ export default function HomePage() {
           folder: String(t?.folder ?? "Unsorted").trim() || "Unsorted",
           reminder_at: t?.reminder_at ?? null,
         }))
-        .filter((t) => t.text.length > 0)
+        .filter((t) => isTranscriptMeaningful(t.text))
         .slice(0, 10)
+
+      const dateLabel = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })
 
       if (safeThoughts.length === 0) {
         addMemo({
@@ -334,7 +390,7 @@ export default function HomePage() {
           status: "ready",
           date: dateLabel,
           category: "Unsorted",
-          ...(data?.transcription && { transcription: String(data.transcription) }),
+          transcription: rawTranscription,
         })
         return
       }
@@ -377,7 +433,6 @@ export default function HomePage() {
           return
         }
 
-        // Reset accumulator and active flag for a fresh session
         transcriptRef.current = ""
         isRecordingActiveRef.current = true
 
@@ -389,8 +444,6 @@ export default function HomePage() {
         return
       }
 
-      // Client-side pre-check — avoids starting the mic + sending audio only
-      // to get a 429 back. The server enforces the real limit regardless.
       if (rateLimitCount >= DAILY_LIMIT) {
         setError(`Daily AI limit of ${DAILY_LIMIT} uses reached. Switch to Voice-to-Text Only mode or try again tomorrow.`)
         return
@@ -401,6 +454,7 @@ export default function HomePage() {
 
       mediaRecorderRef.current = mediaRecorder
       audioChunksRef.current = []
+      recordingStartTimeRef.current = Date.now() // ← start the wall-clock timer
 
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) audioChunksRef.current.push(e.data)
@@ -408,8 +462,9 @@ export default function HomePage() {
 
       mediaRecorder.onstop = async () => {
         stream.getTracks().forEach((track) => track.stop())
+        const durationSeconds = (Date.now() - recordingStartTimeRef.current) / 1000
         const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" })
-        await processAudioWithGemini(audioBlob)
+        await processAudioWithGemini(audioBlob, durationSeconds)
         setRecording(false)
         setRecordingTime(0)
       }
@@ -428,7 +483,6 @@ export default function HomePage() {
 
   const stopRecording = () => {
     if (voiceOnlyMode) {
-      // Signal to onend that the user stopped — prevents further auto-restarts
       isRecordingActiveRef.current = false
       if (recognitionRef.current) {
         try { recognitionRef.current.stop() } catch { /* ignore */ }
@@ -459,7 +513,6 @@ export default function HomePage() {
       <DotGridBackground />
       <Navbar />
       <main className="relative z-10 container mx-auto px-4 py-8">
-        {/* Welcome Message */}
         {username && (
           <div className="mb-8">
             <h1 className="text-4xl font-bold tracking-tight text-foreground mb-2">
@@ -549,7 +602,7 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {/* Info banners — hidden while confirmation is active */}
+                {/* Info banners */}
                 {showRecordButton && !voiceOnlyMode && (
                   <div className="rounded-lg border border-border bg-muted/50 p-4">
                     <div className="flex items-start gap-3">
@@ -597,10 +650,9 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {/* ── Post-recording confirmation panel ── */}
+                {/* Post-recording confirmation panel */}
                 {pendingTranscript && !confirmed && (
                   <div className="rounded-xl border-2 border-accent/30 bg-gradient-to-b from-accent/5 to-transparent overflow-hidden">
-                    {/* Header */}
                     <div className="flex items-center gap-2 px-4 pt-4 pb-3 border-b border-accent/15">
                       <div className="flex size-6 items-center justify-center rounded-full bg-accent/20">
                         <CheckCircle2 className="size-3.5 text-accent" />
@@ -609,7 +661,6 @@ export default function HomePage() {
                     </div>
 
                     <div className="p-4 space-y-4">
-                      {/* Transcript preview */}
                       <div className="rounded-lg bg-muted/60 border border-border px-3 py-2.5">
                         <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide mb-1">
                           Transcript
@@ -619,7 +670,6 @@ export default function HomePage() {
                         </p>
                       </div>
 
-                      {/* Memo title input */}
                       <div className="space-y-1.5">
                         <Label className="text-xs font-medium text-foreground flex items-center gap-1.5">
                           <PenLine className="size-3 text-accent" />
@@ -637,7 +687,6 @@ export default function HomePage() {
                         </p>
                       </div>
 
-                      {/* Folder selector */}
                       <div className="space-y-1.5">
                         <Label className="text-xs font-medium text-foreground flex items-center gap-1.5">
                           <Folder className="size-3 text-accent" />
@@ -648,14 +697,12 @@ export default function HomePage() {
                             <SelectValue placeholder="Select a folder" />
                           </SelectTrigger>
                           <SelectContent>
-                            {/* Hardcoded Unsorted always first */}
                             <SelectItem value="Unsorted">
                               <span className="flex items-center gap-2">
                                 <Folder className="size-3.5 text-muted-foreground" />
                                 Unsorted
                               </span>
                             </SelectItem>
-                            {/* User folders — already filtered to exclude "Unsorted" */}
                             {folders.map((f) => (
                               <SelectItem key={f.id} value={f.name}>
                                 <span className="flex items-center gap-2">
@@ -668,7 +715,6 @@ export default function HomePage() {
                         </Select>
                       </div>
 
-                      {/* Actions */}
                       <div className="flex gap-2 pt-1">
                         <Button
                           className="flex-1 h-9 text-sm font-semibold"
@@ -731,15 +777,14 @@ export default function HomePage() {
                 {isProcessing && (
                   <div className="flex items-center justify-center gap-3 rounded-lg border border-border bg-accent/10 p-4 text-sm text-accent">
                     <Loader2 className="h-5 w-5 animate-spin" />
-                    <span className="font-medium">
-                      {voiceOnlyMode ? "Saving transcript..." : "Processing with AI..."}
-                    </span>
+                    <span className="font-medium">Processing with AI...</span>
                   </div>
                 )}
 
                 {error && (
-                  <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-                    {error}
+                  <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive flex items-start gap-2">
+                    <AlertTriangle className="size-4 shrink-0 mt-0.5" />
+                    <span>{error}</span>
                   </div>
                 )}
               </CardContent>

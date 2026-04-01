@@ -2,19 +2,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient } from '@/lib/supabase/server';
 
+// Initialize Gemini with the 3.1 Flash-Lite Preview model
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 const DAILY_LIMIT = 10;
+const MIN_AUDIO_BYTES = 1500;
 
 // ---------------------------------------------------------------------------
 // Rate limit helpers
 // ---------------------------------------------------------------------------
 
-async function checkAndIncrementRateLimit(
+async function checkRateLimit(
   supabase: Awaited<ReturnType<typeof createClient>>,
   userId: string
 ): Promise<{ limited: boolean; count: number }> {
-  const today = new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+  const today = new Date().toISOString().slice(0, 10);
 
   const { data: existing, error: fetchErr } = await supabase
     .from('gemini_usage')
@@ -24,18 +26,22 @@ async function checkAndIncrementRateLimit(
     .maybeSingle();
 
   if (fetchErr) {
-    // Fail open — don't block the user for a DB hiccup
     console.error('rate limit fetch error:', fetchErr);
     return { limited: false, count: 0 };
   }
 
-  const currentCount = existing?.call_count ?? 0;
+  const count = existing?.call_count ?? 0;
+  return { limited: count >= DAILY_LIMIT, count };
+}
 
-  if (currentCount >= DAILY_LIMIT) {
-    return { limited: true, count: currentCount };
-  }
+async function incrementRateLimit(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+  currentCount: number
+): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
 
-  const { error: upsertErr } = await supabase.from('gemini_usage').upsert(
+  const { error } = await supabase.from('gemini_usage').upsert(
     {
       user_id: userId,
       usage_date: today,
@@ -45,12 +51,22 @@ async function checkAndIncrementRateLimit(
     { onConflict: 'user_id,usage_date' }
   );
 
-  if (upsertErr) {
-    console.error('rate limit upsert error:', upsertErr);
-    return { limited: false, count: currentCount };
-  }
+  if (error) console.error('rate limit increment error:', error);
+}
 
-  return { limited: false, count: currentCount + 1 };
+// ---------------------------------------------------------------------------
+// Content guards
+// ---------------------------------------------------------------------------
+
+function isMeaningful(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length < 3) return false;
+  // Filter out common hallucination words if they appear alone
+  const hallucinationBlacklist = ['thank you', 'thanks for watching', 'subtitle', 'bye'];
+  if (hallucinationBlacklist.includes(trimmed.toLowerCase())) return false;
+  
+  const words = trimmed.split(/\s+/).filter((w) => w.length > 1);
+  return words.length >= 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -61,9 +77,9 @@ export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
     const audioFile = formData.get('audio') as File;
-
     const userTimezone = (formData.get('timezone') as string | null) || 'UTC';
     const rawOffsetMins = parseInt(formData.get('timezoneOffset') as string ?? '0', 10);
+    
     const userOffsetString = (() => {
       const totalMins = -rawOffsetMins;
       const sign = totalMins >= 0 ? '+' : '-';
@@ -77,6 +93,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No audio file provided' }, { status: 400 });
     }
 
+    if (audioFile.size < MIN_AUDIO_BYTES) {
+      return NextResponse.json(
+        { error: 'Recording was too short or silent.' },
+        { status: 400 }
+      );
+    }
+
     const supabase = await createClient();
     const { data: { user }, error: userErr } = await supabase.auth.getUser();
 
@@ -84,131 +107,92 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    // Rate limit check — happens before any Gemini work
-    const { limited, count } = await checkAndIncrementRateLimit(supabase, user.id);
+    const { limited, count: currentCount } = await checkRateLimit(supabase, user.id);
 
     if (limited) {
       return NextResponse.json(
-        {
-          error: `Daily AI limit of ${DAILY_LIMIT} uses reached. Try again tomorrow.`,
-          rateLimited: true,
-          count,
-          limit: DAILY_LIMIT,
-        },
+        { error: `Daily limit of ${DAILY_LIMIT} reached.`, rateLimited: true, count: currentCount },
         { status: 429 }
       );
     }
 
-    const { data: folders, error: foldersErr } = await supabase
-      .from('folders')
-      .select('name')
-      .eq('user_id', user.id);
-
-    if (foldersErr) {
-      return NextResponse.json(
-        { error: foldersErr.message || 'Failed to load folders' },
-        { status: 500 }
-      );
-    }
-
-    const existingFolderNames = (folders ?? [])
-      .map((f: any) => String(f?.name ?? '').trim())
-      .filter(Boolean);
-
-    const allowedFolders = Array.from(new Set(['Unsorted', ...existingFolderNames]));
+    // Fetch folders for categorization
+    const { data: folders } = await supabase.from('folders').select('name').eq('user_id', user.id);
+    const allowedFolders = Array.from(new Set(['Unsorted', ...(folders?.map(f => f.name) || [])]));
 
     const bytes = await audioFile.arrayBuffer();
     const base64Audio = Buffer.from(bytes).toString('base64');
     const mimeType = audioFile.type || 'audio/webm';
 
-    // UPDATED: Using Gemini 3.1 Flash-Lite with JSON response mode
-    const model = genAI.getGenerativeModel({ 
+    // ── CONFIGURATION: The Anti-Hallucination Setup ────────────────────────
+    const model = genAI.getGenerativeModel({
       model: 'gemini-3.1-flash-lite-preview',
+      systemInstruction: `You are a literal transcription engine. 
+      STRICT AUDIT RULES:
+      1. If the audio is silence, static, or background noise, return exactly: {"transcription": "", "thoughts": []}
+      2. Do NOT greet the user. Do NOT explain your output. 
+      3. Never "autocomplete" speech. If you hear "Buy...", do not output "Buy groceries" unless you hear "groceries".`,
       generationConfig: {
-        responseMimeType: "application/json",
-      }
+        responseMimeType: 'application/json',
+        temperature: 0.0, // Force absolute literalism
+      },
     });
 
     const nowLocal = new Date().toLocaleString('en-US', {
-      timeZone: userTimezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
+      timeZone: userTimezone, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
     });
 
-    const exampleTs = `2025-03-15T09:00:00${userOffsetString}`;
-
     const prompt = [
-      'Transcribe the audio, then extract distinct thoughts (each an actionable idea, plan, task, or note).',
-      '',
       `User local time: ${nowLocal}`,
-      `User timezone: ${userTimezone} (UTC offset ${userOffsetString})`,
+      `User UTC offset: ${userOffsetString}`,
       '',
-      'Respond with a valid JSON object. Do not include markdown code fences.',
-      'The object must have exactly two keys:',
-      '  "transcription" — string, the full transcript.',
-      '  "thoughts" — array of objects, each with these four string keys:',
-      '    "text"        — the thought content.',
-      '    "label"       — 2 to 5 word summary.',
-      '    "folder"      — must be one of the allowed folder names below; use "Unsorted" if none fit.',
-      '    "reminder_at" — ISO 8601 timestamp string if the audio mentions a date/time for this thought, otherwise JSON null.',
+      '### TASK ###',
+      'Transcribe and extract thoughts into JSON. ',
+      'Return {"transcription": "", "thoughts": []} if NO CLEAR SPEECH IS DETECTED.',
       '',
-      'reminder_at rules:',
-      '  - Only set it when the audio clearly states a date, time, or relative reference (tomorrow, next Friday, in 2 hours, etc.).',
-      '  - Resolve relative references using the user local time above.',
-      '  - When a date is given without a time, default to 09:00 local — never use midnight.',
-      `  - Include the UTC offset in the timestamp. Example: "${exampleTs}"`,
-      '  - Use JSON null (not the string null) when there is no date or time.',
+      '### SCHEMA ###',
+      '{ "transcription": "string", "thoughts": [{ "text": "string", "label": "string", "folder": "string", "reminder_at": "ISO8601 or null" }] }',
       '',
-      `Allowed folder names: ${JSON.stringify(allowedFolders)}`,
+      `Allowed folders: ${JSON.stringify(allowedFolders)}`,
     ].join('\n');
 
-    const result = await model.generateContent([
-      { inlineData: { data: base64Audio, mimeType } },
-      prompt,
-    ]);
-
-    // UPDATED: Since we use responseMimeType, we parse the text directly
-    const raw = result.response.text();
-    const parsedData = JSON.parse(raw);
+    const result = await model.generateContent([{ inlineData: { data: base64Audio, mimeType } }, prompt]);
+    const parsedData = JSON.parse(result.response.text());
 
     const transcription = String(parsedData?.transcription ?? '').trim();
     const rawThoughts = Array.isArray(parsedData?.thoughts) ? parsedData.thoughts : [];
 
     const thoughts = rawThoughts
-      .map((t: any) => {
-        const text = String(t?.text ?? '').trim();
-        const label = String(t?.label ?? '').trim();
-        const folder = String(t?.folder ?? 'Unsorted').trim();
-
-        let reminder_at: string | null = null;
-        if (t?.reminder_at && typeof t.reminder_at === 'string') {
-          const parsed = new Date(t.reminder_at);
-          if (!isNaN(parsed.getTime())) {
-            reminder_at = t.reminder_at;
-          }
-        }
-
-        return {
-          text,
-          label,
-          folder: allowedFolders.includes(folder) ? folder : 'Unsorted',
-          reminder_at,
-        };
-      })
-      .filter((t: any) => t.text.length > 0)
+      .map((t: any) => ({
+        text: String(t?.text ?? '').trim(),
+        label: String(t?.label ?? '').trim(),
+        folder: allowedFolders.includes(t?.folder) ? t.folder : 'Unsorted',
+        reminder_at: (t?.reminder_at && !isNaN(new Date(t.reminder_at).getTime())) ? t.reminder_at : null,
+      }))
+      .filter((t: any) => isMeaningful(t.text))
       .slice(0, 10);
 
-    const primaryLabel = thoughts[0]?.label || 'Voice Memo';
-    const primaryCategory = thoughts[0]?.folder || 'Unsorted';
+    // ── FINAL HALLUCINATION GUARD ──────────────────────────────────────────
+    // If transcription is long but audio is tiny (e.g. < 10KB), it's a hallucination.
+    const isLikelyHallucination = transcription.length > 20 && audioFile.size < 4000;
+    const hasUsableContent = !isLikelyHallucination && (thoughts.length > 0 || isMeaningful(transcription));
 
-    return NextResponse.json({ transcription, thoughts, label: primaryLabel, category: primaryCategory });
+    if (!hasUsableContent) {
+      return NextResponse.json({ error: 'No speech detected.', noContent: true }, { status: 422 });
+    }
+
+    await incrementRateLimit(supabase, user.id, currentCount);
+
+    return NextResponse.json({
+      transcription,
+      thoughts,
+      label: thoughts[0]?.label || 'Voice Memo',
+      category: thoughts[0]?.folder || 'Unsorted'
+    });
 
   } catch (error: any) {
     console.error('Transcription error:', error);
-    return NextResponse.json({ error: error.message || 'Transcription failed' }, { status: 500 });
+    return NextResponse.json({ error: 'Process failed' }, { status: 500 });
   }
 }
