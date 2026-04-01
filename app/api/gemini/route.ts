@@ -9,52 +9,6 @@ const DAILY_LIMIT = 10;
 const MIN_AUDIO_BYTES = 1500;
 
 // ---------------------------------------------------------------------------
-// Rate limit helpers
-// ---------------------------------------------------------------------------
-
-async function checkRateLimit(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  userId: string
-): Promise<{ limited: boolean; count: number }> {
-  const today = new Date().toISOString().slice(0, 10);
-
-  const { data: existing, error: fetchErr } = await supabase
-    .from('gemini_usage')
-    .select('call_count')
-    .eq('user_id', userId)
-    .eq('usage_date', today)
-    .maybeSingle();
-
-  if (fetchErr) {
-    console.error('rate limit fetch error:', fetchErr);
-    return { limited: false, count: 0 };
-  }
-
-  const count = existing?.call_count ?? 0;
-  return { limited: count >= DAILY_LIMIT, count };
-}
-
-async function incrementRateLimit(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  userId: string,
-  currentCount: number
-): Promise<void> {
-  const today = new Date().toISOString().slice(0, 10);
-
-  const { error } = await supabase.from('gemini_usage').upsert(
-    {
-      user_id: userId,
-      usage_date: today,
-      call_count: currentCount + 1,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: 'user_id,usage_date' }
-  );
-
-  if (error) console.error('rate limit increment error:', error);
-}
-
-// ---------------------------------------------------------------------------
 // Content guards
 // ---------------------------------------------------------------------------
 
@@ -64,7 +18,7 @@ function isMeaningful(text: string): boolean {
   // Filter out common hallucination words if they appear alone
   const hallucinationBlacklist = ['thank you', 'thanks for watching', 'subtitle', 'bye'];
   if (hallucinationBlacklist.includes(trimmed.toLowerCase())) return false;
-  
+
   const words = trimmed.split(/\s+/).filter((w) => w.length > 1);
   return words.length >= 1;
 }
@@ -79,7 +33,7 @@ export async function POST(request: NextRequest) {
     const audioFile = formData.get('audio') as File;
     const userTimezone = (formData.get('timezone') as string | null) || 'UTC';
     const rawOffsetMins = parseInt(formData.get('timezoneOffset') as string ?? '0', 10);
-    
+
     const userOffsetString = (() => {
       const totalMins = -rawOffsetMins;
       const sign = totalMins >= 0 ? '+' : '-';
@@ -107,9 +61,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { limited, count: currentCount } = await checkRateLimit(supabase, user.id);
+    // ---------------------------------------------------------------------------
+    // Rate limit check — read current count before doing any work
+    // ---------------------------------------------------------------------------
+    const today = new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
 
-    if (limited) {
+    const { data: existing, error: fetchErr } = await supabase
+      .from('gemini_usage')
+      .select('call_count')
+      .eq('user_id', user.id)
+      .eq('usage_date', today)
+      .maybeSingle();
+
+    if (fetchErr) {
+      console.error('rate limit fetch error:', fetchErr);
+    }
+
+    const currentCount = existing?.call_count ?? 0;
+
+    if (currentCount >= DAILY_LIMIT) {
       return NextResponse.json(
         { error: `Daily limit of ${DAILY_LIMIT} reached.`, rateLimited: true, count: currentCount },
         { status: 429 }
@@ -179,10 +149,18 @@ export async function POST(request: NextRequest) {
     const hasUsableContent = !isLikelyHallucination && (thoughts.length > 0 || isMeaningful(transcription));
 
     if (!hasUsableContent) {
+      // No real speech — do NOT increment the counter
       return NextResponse.json({ error: 'No speech detected.', noContent: true }, { status: 422 });
     }
 
-    await incrementRateLimit(supabase, user.id, currentCount);
+    // ---------------------------------------------------------------------------
+    // Atomically increment the counter only after confirmed good response.
+    // The SQL function handles INSERT-or-UPDATE so there's no stale-read race.
+    // ---------------------------------------------------------------------------
+    const { error: rpcError } = await supabase
+      .rpc('increment_gemini_usage', { p_user_id: user.id });
+
+    if (rpcError) console.error('rate limit increment error:', rpcError);
 
     return NextResponse.json({
       transcription,
