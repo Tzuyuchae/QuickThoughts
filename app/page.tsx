@@ -35,6 +35,10 @@ import {
   AlertTriangle,
   CheckCircle2,
   PenLine,
+  X,
+  Clock3,
+  Brain,
+  FileText,
 } from "lucide-react"
 import { Navbar } from "@/components/ui/navbar"
 import { useMemos } from "@/app/context/MemoContext"
@@ -81,7 +85,6 @@ const MIN_RECORDING_SECONDS = 2
 function isTranscriptMeaningful(text: string): boolean {
   const trimmed = text.trim()
   if (trimmed.length < MIN_TRANSCRIPT_LENGTH) return false
-  // Must have at least one word longer than 1 character
   const words = trimmed.split(/\s+/).filter((w) => w.length > 1)
   return words.length >= 1
 }
@@ -96,17 +99,17 @@ export default function HomePage() {
   const [recordingTime, setRecordingTime] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [isTestingMic, setIsTestingMic] = useState(false)
+  const [micTestStatus, setMicTestStatus] = useState<string | null>(null)
+  const [micLevel, setMicLevel] = useState(0)
 
-  // Voice-to-text only mode
   const [voiceOnlyMode, setVoiceOnlyMode] = useState(false)
 
-  // Post-recording confirmation state (voice-only)
   const [pendingTranscript, setPendingTranscript] = useState<string | null>(null)
   const [selectedFolder, setSelectedFolder] = useState<string>("Unsorted")
   const [memoTitle, setMemoTitle] = useState<string>("")
   const [confirmed, setConfirmed] = useState(false)
 
-  // Rate limit state — fetched from DB, never from localStorage
   const [rateLimitCount, setRateLimitCount] = useState(0)
   const [rateLimitLoading, setRateLimitLoading] = useState(true)
 
@@ -119,11 +122,15 @@ export default function HomePage() {
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null)
   const recordingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const recognitionRef = useRef<any>(null)
-  // Used inside SpeechRecognition callbacks — refs prevent stale closure issues
-  const isRecordingActiveRef = useRef(false)  // true while user hasn't pressed Stop
-  const transcriptRef = useRef("")            // accumulates text across all restarts
-  // Tracks actual wall-clock recording duration for the pre-Gemini duration guard
+  const isCancellingRef = useRef(false)
+  const isRecordingActiveRef = useRef(false)
+  const transcriptRef = useRef("")
   const recordingStartTimeRef = useRef<number>(0)
+
+  const micTestStreamRef = useRef<MediaStream | null>(null)
+  const micTestAudioContextRef = useRef<AudioContext | null>(null)
+  const micTestAnalyserRef = useRef<AnalyserNode | null>(null)
+  const micTestAnimationFrameRef = useRef<number | null>(null)
 
   // ---------------------------------------------------------------------------
   // Fetch real rate limit count from the database
@@ -136,7 +143,7 @@ export default function HomePage() {
         setRateLimitCount(data.count ?? 0)
       }
     } catch {
-      // If the fetch fails, keep whatever count we have — don't block the UI
+      // ignore
     } finally {
       setRateLimitLoading(false)
     }
@@ -177,18 +184,148 @@ export default function HomePage() {
     return () => {
       mounted = false
       isRecordingActiveRef.current = false
+
       if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop()
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
       if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
+
       if (recognitionRef.current) {
-        try { recognitionRef.current.stop() } catch { /* ignore */ }
+        try { recognitionRef.current.stop() } catch {}
+      }
+
+      if (micTestAnimationFrameRef.current) {
+        cancelAnimationFrame(micTestAnimationFrameRef.current)
+      }
+
+      if (micTestStreamRef.current) {
+        micTestStreamRef.current.getTracks().forEach((track) => track.stop())
+      }
+
+      if (micTestAudioContextRef.current) {
+        void micTestAudioContextRef.current.close()
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const stopMicrophoneTest = () => {
+    if (micTestAnimationFrameRef.current) {
+      cancelAnimationFrame(micTestAnimationFrameRef.current)
+      micTestAnimationFrameRef.current = null
+    }
+
+    if (micTestStreamRef.current) {
+      micTestStreamRef.current.getTracks().forEach((track) => track.stop())
+      micTestStreamRef.current = null
+    }
+
+    if (micTestAudioContextRef.current) {
+      void micTestAudioContextRef.current.close()
+      micTestAudioContextRef.current = null
+    }
+
+    micTestAnalyserRef.current = null
+    setIsTestingMic(false)
+    setMicLevel(0)
+  }
+
+  const requestMicrophoneAccess = async (): Promise<MediaStream> => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("This browser does not support microphone access.")
+    }
+
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: true })
+    } catch (err: any) {
+      const permissionName = "microphone" as PermissionName
+      const permissionsApiAvailable =
+        typeof navigator !== "undefined" && !!navigator.permissions?.query
+
+      if (permissionsApiAvailable) {
+        try {
+          const permissionStatus = await navigator.permissions.query({ name: permissionName })
+
+          if (permissionStatus.state === "prompt") {
+            return await navigator.mediaDevices.getUserMedia({ audio: true })
+          }
+        } catch {
+          // ignore permissions api issues
+        }
+      }
+
+      if (err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError") {
+        throw new Error(
+          "Microphone permission is blocked. Please allow microphone access in your browser and try again."
+        )
+      }
+
+      if (err?.name === "NotFoundError" || err?.name === "DevicesNotFoundError") {
+        throw new Error("No microphone was found on this device.")
+      }
+
+      throw new Error("Unable to access your microphone. Please try again.")
+    }
+  }
+
+  const testMicrophone = async () => {
+    if (isTestingMic) {
+      stopMicrophoneTest()
+      setMicTestStatus("Microphone test stopped.")
+      return
+    }
+
+    setMicTestStatus(null)
+    setError(null)
+    setMicLevel(0)
+
+    try {
+      const stream = await requestMicrophoneAccess()
+      const audioContext = new AudioContext()
+      const analyser = audioContext.createAnalyser()
+      const source = audioContext.createMediaStreamSource(stream)
+
+      analyser.fftSize = 2048
+      analyser.smoothingTimeConstant = 0.85
+      source.connect(analyser)
+
+      micTestStreamRef.current = stream
+      micTestAudioContextRef.current = audioContext
+      micTestAnalyserRef.current = analyser
+
+      setIsTestingMic(true)
+      setMicTestStatus(
+        "Listening... speak to test your microphone, then press Stop Test when you're done."
+      )
+
+      const dataArray = new Uint8Array(analyser.fftSize)
+
+      const updateMicLevel = () => {
+        const activeAnalyser = micTestAnalyserRef.current
+        if (!activeAnalyser) return
+
+        activeAnalyser.getByteTimeDomainData(dataArray)
+
+        let sumSquares = 0
+        for (let i = 0; i < dataArray.length; i++) {
+          const normalized = (dataArray[i] - 128) / 128
+          sumSquares += normalized * normalized
+        }
+
+        const rms = Math.sqrt(sumSquares / dataArray.length)
+        setMicLevel(rms * 100)
+
+        micTestAnimationFrameRef.current = requestAnimationFrame(updateMicLevel)
+      }
+
+      updateMicLevel()
+    } catch (err: any) {
+      stopMicrophoneTest()
+      setMicTestStatus(null)
+      setError(err?.message || "Microphone test failed.")
+    }
+  }
+
   // ---------------------------------------------------------------------------
-  // SpeechRecognition — continuous=false + restart strategy (see file header)
+  // SpeechRecognition — continuous=false + restart strategy
   // ---------------------------------------------------------------------------
   const attachRecognition = () => {
     const SpeechRecognition =
@@ -213,7 +350,7 @@ export default function HomePage() {
     recognition.onerror = (event: any) => {
       if (event.error === "no-speech") {
         if (isRecordingActiveRef.current) {
-          try { attachRecognition() } catch { /* ignore */ }
+          try { attachRecognition() } catch {}
         }
         return
       }
@@ -224,19 +361,31 @@ export default function HomePage() {
 
       const messages: Record<string, string> = {
         "service-not-allowed": "Speech recognition is not available in this browser. Try updating Chrome or using a different browser.",
-        "not-allowed":         "Microphone access was denied. Please allow microphone permission and try again.",
-        "network":             "Network error with speech service. Please check your connection.",
-        "audio-capture":       "No microphone found. Please check your device.",
-        "aborted":             "Recording was cancelled.",
+        "not-allowed": "Microphone access was denied. Please allow microphone permission and try again.",
+        "network": "Network error with speech service. Please check your connection.",
+        "audio-capture": "No microphone found. Please check your device.",
+        "aborted": "Recording was cancelled.",
       }
+
       setError(messages[event.error] ?? `Speech error: ${event.error}. Please try again.`)
       setRecording(false)
       setRecordingTime(0)
     }
 
     recognition.onend = () => {
+      if (isCancellingRef.current) {
+        isCancellingRef.current = false
+        transcriptRef.current = ""
+        if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
+        if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
+        setPendingTranscript(null)
+        setRecording(false)
+        setRecordingTime(0)
+        return
+      }
+
       if (isRecordingActiveRef.current) {
-        try { attachRecognition() } catch { /* ignore */ }
+        try { attachRecognition() } catch {}
         return
       }
 
@@ -264,9 +413,6 @@ export default function HomePage() {
     recognition.start()
   }
 
-  // ---------------------------------------------------------------------------
-  // Confirm and save pending voice-only memo
-  // ---------------------------------------------------------------------------
   const confirmAndSaveMemo = () => {
     if (!pendingTranscript) return
 
@@ -303,19 +449,15 @@ export default function HomePage() {
   }
 
   const discardPendingMemo = () => {
+    stopMicrophoneTest()
     setPendingTranscript(null)
     setSelectedFolder("Unsorted")
     setMemoTitle("")
     setConfirmed(false)
+    setMicTestStatus(null)
   }
 
-  // ---------------------------------------------------------------------------
-  // Gemini processing
-  // ---------------------------------------------------------------------------
   const processAudioWithGemini = async (audioBlob: Blob, durationSeconds: number, fileName?: string) => {
-    // ── Guard 1: minimum duration ────────────────────────────────────────────
-    // Catches tap-start-tap-stop with no speech. The webm container headers
-    // alone can push a silent blob past MIN_AUDIO_BYTES, so we check time too.
     if (durationSeconds < MIN_RECORDING_SECONDS) {
       setError("Recording was too short. Please hold the button and speak, then tap Stop.")
       setRecording(false)
@@ -323,7 +465,6 @@ export default function HomePage() {
       return
     }
 
-    // ── Guard 2: minimum blob size ───────────────────────────────────────────
     if (audioBlob.size < MIN_AUDIO_BYTES) {
       setError("Recording was too short or silent. Please speak clearly and try again.")
       setRecording(false)
@@ -351,8 +492,6 @@ export default function HomePage() {
         }
 
         if (response.status === 422 && errorData.noContent) {
-          // Server confirmed no real speech — count was NOT incremented.
-          // Re-fetch to keep the displayed count in sync with the DB.
           await fetchRateLimitCount()
           throw new Error(errorData.error || "No speech detected. This has not been counted against your daily limit.")
         }
@@ -362,8 +501,6 @@ export default function HomePage() {
 
       const data = await response.json()
 
-      // Server validated content and incremented the counter before returning 200.
-      // Bump local display count and background-sync with DB truth.
       setRateLimitCount((prev) => Math.min(prev + 1, DAILY_LIMIT))
       fetchRateLimitCount()
 
@@ -414,15 +551,15 @@ export default function HomePage() {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Recording controls
-  // ---------------------------------------------------------------------------
   const startRecording = async () => {
     try {
+      stopMicrophoneTest()
       setError(null)
+      setMicTestStatus(null)
       setPendingTranscript(null)
       setMemoTitle("")
       setConfirmed(false)
+      isCancellingRef.current = false
 
       if (voiceOnlyMode) {
         const SpeechRecognition =
@@ -449,12 +586,12 @@ export default function HomePage() {
         return
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const stream = await requestMicrophoneAccess()
       const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" })
 
       mediaRecorderRef.current = mediaRecorder
       audioChunksRef.current = []
-      recordingStartTimeRef.current = Date.now() // ← start the wall-clock timer
+      recordingStartTimeRef.current = Date.now()
 
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) audioChunksRef.current.push(e.data)
@@ -462,6 +599,15 @@ export default function HomePage() {
 
       mediaRecorder.onstop = async () => {
         stream.getTracks().forEach((track) => track.stop())
+
+        if (isCancellingRef.current) {
+          isCancellingRef.current = false
+          audioChunksRef.current = []
+          setRecording(false)
+          setRecordingTime(0)
+          return
+        }
+
         const durationSeconds = (Date.now() - recordingStartTimeRef.current) / 1000
         const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" })
         await processAudioWithGemini(audioBlob, durationSeconds)
@@ -475,8 +621,8 @@ export default function HomePage() {
       recordingTimeoutRef.current = setTimeout(() => {
         if (mediaRecorder.state === "recording") stopRecording()
       }, 120000)
-    } catch (err) {
-      setError("Microphone access denied.")
+    } catch (err: any) {
+      setError(err?.message || "Microphone access denied.")
       setRecording(false)
     }
   }
@@ -485,15 +631,47 @@ export default function HomePage() {
     if (voiceOnlyMode) {
       isRecordingActiveRef.current = false
       if (recognitionRef.current) {
-        try { recognitionRef.current.stop() } catch { /* ignore */ }
+        try { recognitionRef.current.stop() } catch {}
       }
     } else {
       if (mediaRecorderRef.current?.state === "recording") {
         mediaRecorderRef.current.stop()
       }
     }
+
     if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
     if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
+  }
+
+  const cancelRecording = () => {
+    stopMicrophoneTest()
+    isCancellingRef.current = true
+    setError(null)
+    setMicTestStatus(null)
+    setPendingTranscript(null)
+    setMemoTitle("")
+    setConfirmed(false)
+    setRecordingTime(0)
+
+    if (voiceOnlyMode) {
+      transcriptRef.current = ""
+      isRecordingActiveRef.current = false
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop() } catch {}
+      }
+    } else {
+      audioChunksRef.current = []
+      if (mediaRecorderRef.current?.state === "recording") {
+        mediaRecorderRef.current.stop()
+      } else {
+        isCancellingRef.current = false
+        setRecording(false)
+      }
+    }
+
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
+    if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
+    setRecording(false)
   }
 
   const formatTime = (seconds: number): string => {
@@ -505,6 +683,22 @@ export default function HomePage() {
   const progress = (recordingTime / 120) * 100
   const rateLimitExceeded = rateLimitCount >= DAILY_LIMIT
   const rateLimitProgress = Math.min((rateLimitCount / DAILY_LIMIT) * 100, 100)
+  const micLevelPercent = Math.min(Math.max(micLevel * 2.2, 0), 100)
+
+  const now = new Date()
+  const oneWeekFromNow = new Date(now)
+  oneWeekFromNow.setDate(oneWeekFromNow.getDate() + 7)
+
+  const upcomingMemos = memos.filter((memo) => {
+    if (!memo.reminder_at) return false
+    const reminderDate = new Date(memo.reminder_at)
+    return !Number.isNaN(reminderDate.getTime()) && reminderDate > now
+  })
+
+  const upcomingMemosNextWeek = upcomingMemos.filter((memo) => {
+    const reminderDate = new Date(memo.reminder_at as string)
+    return reminderDate <= oneWeekFromNow
+  })
 
   const showRecordButton = !pendingTranscript && !confirmed
 
@@ -524,8 +718,82 @@ export default function HomePage() {
           </div>
         )}
 
+        <div className="mb-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <Card className="border-2 border-border bg-secondary/20">
+            <CardContent className="p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-muted-foreground">Upcoming Memos</p>
+                  <p className="mt-2 text-3xl font-bold text-foreground">{upcomingMemos.length}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Memos with reminders scheduled in the future
+                  </p>
+                </div>
+                <div className="flex size-10 items-center justify-center rounded-full bg-accent/20">
+                  <Calendar className="size-5 text-accent" />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="border-2 border-border bg-secondary/20">
+            <CardContent className="p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-muted-foreground">
+                    Upcoming Within 7 Days
+                  </p>
+                  <p className="mt-2 text-3xl font-bold text-foreground">
+                    {upcomingMemosNextWeek.length}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Reminder-based memos due within the next week
+                  </p>
+                </div>
+                <div className="flex size-10 items-center justify-center rounded-full bg-accent/20">
+                  <Clock3 className="size-5 text-accent" />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="border-2 border-border bg-secondary/20">
+            <CardContent className="p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-muted-foreground">AI API Usages Today</p>
+                  <p className="mt-2 text-3xl font-bold text-foreground">
+                    {rateLimitLoading ? "…" : rateLimitCount}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Out of {DAILY_LIMIT} daily AI requests
+                  </p>
+                </div>
+                <div className="flex size-10 items-center justify-center rounded-full bg-accent/20">
+                  <Brain className="size-5 text-accent" />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="border-2 border-border bg-secondary/20">
+            <CardContent className="p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-muted-foreground">Total Memos Created</p>
+                  <p className="mt-2 text-3xl font-bold text-foreground">{memos.length}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Total memos currently stored in your workspace
+                  </p>
+                </div>
+                <div className="flex size-10 items-center justify-center rounded-full bg-accent/20">
+                  <FileText className="size-5 text-accent" />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
         <div className="grid gap-8 lg:grid-cols-[400px_1fr]">
-          {/* Recording Card */}
           <div className="w-full">
             <Card className="border-2 border-border bg-secondary/20">
               <CardHeader>
@@ -541,7 +809,6 @@ export default function HomePage() {
               </CardHeader>
 
               <CardContent className="space-y-5">
-                {/* Voice-only toggle */}
                 <div className="rounded-lg border border-border bg-muted/50 p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-start gap-3 flex-1">
@@ -566,6 +833,7 @@ export default function HomePage() {
                       onCheckedChange={(val) => {
                         setVoiceOnlyMode(val)
                         setError(null)
+                        setMicTestStatus(null)
                         setPendingTranscript(null)
                         setSelectedFolder("Unsorted")
                         setMemoTitle("")
@@ -577,7 +845,61 @@ export default function HomePage() {
                   </div>
                 </div>
 
-                {/* Rate limit bar (AI mode only) */}
+                {/* Microphone test */}
+                <div className="rounded-lg border border-border bg-muted/50 p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3 flex-1">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent/20">
+                        <Mic className="size-4 text-accent" />
+                      </div>
+                      <div className="flex-1 text-sm">
+                        <p className="font-medium text-foreground mb-0.5">Microphone Test</p>
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                          Speak and watch the input bar respond, then stop the test when you're done.
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant={isTestingMic ? "destructive" : "outline"}
+                      size="sm"
+                      className="shrink-0"
+                      onClick={testMicrophone}
+                      disabled={recording || isProcessing}
+                    >
+                      {isTestingMic ? (
+                        <>
+                          <Square className="mr-2 h-4 w-4 fill-current" />
+                          Stop Test
+                        </>
+                      ) : (
+                        <>
+                          <Mic className="mr-2 h-4 w-4" />
+                          Start Test
+                        </>
+                      )}
+                    </Button>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>{isTestingMic ? "Listening for your voice..." : "Mic input level"}</span>
+                      <span className="font-mono">{Math.round(micLevelPercent)}%</span>
+                    </div>
+                    <Progress value={micLevelPercent} className="h-3" />
+                    <p className="text-[11px] text-muted-foreground">
+                      Talk normally and watch the bar move. Little or no movement usually means the browser is not receiving mic audio.
+                    </p>
+                  </div>
+
+                  {micTestStatus && (
+                    <div className="rounded-lg border border-green-500/40 bg-green-500/10 p-3 text-sm text-green-600 dark:text-green-400 flex items-start gap-2">
+                      <CheckCircle2 className="size-4 shrink-0 mt-0.5" />
+                      <span>{micTestStatus}</span>
+                    </div>
+                  )}
+                </div>
+
                 {!voiceOnlyMode && (
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -602,7 +924,6 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {/* Info banners */}
                 {showRecordButton && !voiceOnlyMode && (
                   <div className="rounded-lg border border-border bg-muted/50 p-4">
                     <div className="flex items-start gap-3">
@@ -636,11 +957,12 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {/* Recording progress */}
                 {recording && (
                   <div className="space-y-3">
                     <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">Recording in progress...</span>
+                      <span className="text-muted-foreground">
+                        Recording in progress... Stop to save or Cancel to discard.
+                      </span>
                       <span className="font-mono font-medium text-accent">{formatTime(recordingTime)}</span>
                     </div>
                     <Progress value={progress} className="h-2" />
@@ -650,7 +972,6 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {/* Post-recording confirmation panel */}
                 {pendingTranscript && !confirmed && (
                   <div className="rounded-xl border-2 border-accent/30 bg-gradient-to-b from-accent/5 to-transparent overflow-hidden">
                     <div className="flex items-center gap-2 px-4 pt-4 pb-3 border-b border-accent/15">
@@ -716,17 +1037,10 @@ export default function HomePage() {
                       </div>
 
                       <div className="flex gap-2 pt-1">
-                        <Button
-                          className="flex-1 h-9 text-sm font-semibold"
-                          onClick={confirmAndSaveMemo}
-                        >
+                        <Button className="flex-1 h-9 text-sm font-semibold" onClick={confirmAndSaveMemo}>
                           Save memo
                         </Button>
-                        <Button
-                          variant="outline"
-                          className="h-9 px-4 text-sm"
-                          onClick={discardPendingMemo}
-                        >
+                        <Button variant="outline" className="h-9 px-4 text-sm" onClick={discardPendingMemo}>
                           Discard
                         </Button>
                       </div>
@@ -734,7 +1048,6 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {/* Success confirmation */}
                 {confirmed && (
                   <div className="flex items-center gap-3 rounded-lg border border-green-500/40 bg-green-500/10 p-4">
                     <CheckCircle2 className="h-5 w-5 shrink-0 text-green-500" />
@@ -749,28 +1062,41 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {/* Record / Stop button */}
                 {showRecordButton && (
                   <div className="pt-1">
-                    <Button
-                      className="w-full h-16 rounded-xl text-base font-semibold"
-                      onClick={recording ? stopRecording : startRecording}
-                      variant={recording ? "destructive" : "default"}
-                      disabled={isProcessing || (!voiceOnlyMode && rateLimitExceeded && !recording)}
-                      size="lg"
-                    >
-                      {recording ? (
-                        <>
+                    {recording ? (
+                      <div className="grid grid-cols-2 gap-3">
+                        <Button
+                          className="h-16 rounded-xl text-base font-semibold"
+                          onClick={stopRecording}
+                          variant="destructive"
+                          size="lg"
+                        >
                           <Square className="mr-2 h-5 w-5 fill-current" />
                           Stop Recording
-                        </>
-                      ) : (
-                        <>
-                          <Mic className="mr-2 h-5 w-5" />
-                          Start Recording
-                        </>
-                      )}
-                    </Button>
+                        </Button>
+                        <Button
+                          className="h-16 rounded-xl text-base font-semibold"
+                          onClick={cancelRecording}
+                          variant="outline"
+                          size="lg"
+                        >
+                          <X className="mr-2 h-5 w-5" />
+                          Cancel
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        className="w-full h-16 rounded-xl text-base font-semibold"
+                        onClick={startRecording}
+                        variant="default"
+                        disabled={isProcessing || (!voiceOnlyMode && rateLimitExceeded)}
+                        size="lg"
+                      >
+                        <Mic className="mr-2 h-5 w-5" />
+                        Start Recording
+                      </Button>
+                    )}
                   </div>
                 )}
 
@@ -791,7 +1117,6 @@ export default function HomePage() {
             </Card>
           </div>
 
-          {/* Recent Memos */}
           <div className="w-full">
             <Card className="border-2 border-border bg-secondary/20">
               <CardHeader className="flex flex-row items-center justify-between space-y-0">
