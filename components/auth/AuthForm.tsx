@@ -174,9 +174,25 @@ export default function AuthForm({ mode }: AuthFormProps) {
     return true
   }
 
-  // ---------------------------------------------------------------------------
-  // Form submit
-  // ---------------------------------------------------------------------------
+  async function checkEmailExists(cleanEmail: string) {
+    const res = await fetch("/api/auth/check-email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: cleanEmail }),
+    })
+
+    const data = await res.json()
+
+    if (!res.ok) {
+      throw new Error(data.error || "Unable to check email.")
+    }
+
+    return Boolean(data.exists)
+  }
+
+// ---------------------------------------------------------------------------
+// Form submit
+// ---------------------------------------------------------------------------
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
 
@@ -202,6 +218,12 @@ export default function AuthForm({ mode }: AuthFormProps) {
 
         setLoading(true)
         try {
+          const exists = await checkEmailExists(cleanEmail)
+          if (exists) {
+            toast.error("An account with that email already exists.")
+            return
+          }
+
           const { error } = await supabase.auth.signInWithOtp({
             email: cleanEmail,
             options: {
@@ -214,6 +236,8 @@ export default function AuthForm({ mode }: AuthFormProps) {
 
           toast.success("We emailed you a verification code!")
           setSignupStep("verify")
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Unable to check email.")
         } finally {
           setLoading(false)
         }
