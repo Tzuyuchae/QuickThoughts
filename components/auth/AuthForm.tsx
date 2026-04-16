@@ -365,7 +365,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
             Verify Your Email
           </h1>
           <p className="mb-10 text-center text-base text-muted-foreground text-pretty">
-            We sent a 6-digit code to <strong>{email}</strong>
+            We sent a 8-digit code to <strong>{email}</strong>
           </p>
 
           <form onSubmit={onSubmit} className="flex w-full flex-col gap-4">
@@ -488,11 +488,12 @@ export default function AuthForm({ mode }: AuthFormProps) {
                 type="email"
                 placeholder="you@example.com"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => setEmail(isSignup ? e.target.value.slice(0, 100) : e.target.value)}
                 autoComplete="email"
                 required
                 disabled={isLockedOut}
                 className="h-12 rounded-xl border-border bg-secondary/40 px-4 text-foreground placeholder:text-muted-foreground focus-visible:ring-accent disabled:opacity-50"
+                maxLength={isSignup ? 100 : undefined}
               />
             </div>
 
