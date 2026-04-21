@@ -338,7 +338,15 @@ export default function AuthForm({ mode }: AuthFormProps) {
   // ---------------------------------------------------------------------------
   return (
     <main className="relative flex min-h-screen w-full flex-col items-center justify-center overflow-hidden bg-background p-4">
-      <DotGridBackground />
+      <div
+        className="absolute inset-0 z-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: "url('/images/auth-background.jpg')" }}
+        aria-hidden="true"
+      />
+      <div className="absolute inset-0 z-0 bg-background/45" aria-hidden="true" />
+      <div className="relative z-0">
+        <DotGridBackground />
+      </div>
 
       <div
         className="pointer-events-none absolute left-1/2 top-1/2 z-0 -translate-x-1/2 -translate-y-1/2"
@@ -349,8 +357,8 @@ export default function AuthForm({ mode }: AuthFormProps) {
 
       {/* ── Verification Step ─────────────────────────────────────────────── */}
       {isSignup && signupStep === "verify" ? (
-        <div className="relative z-10 flex w-full max-w-md flex-col items-center px-6">
-          <div className="mb-10">
+        <div className="relative z-10 w-full max-w-md rounded-3xl border border-white/10 bg-black/45 px-6 py-8 shadow-2xl backdrop-blur-md">
+          <div className="mb-10 flex justify-center">
             <Image
               src="/images/qtlogo.png"
               alt="Quick Thoughts logo"
@@ -360,12 +368,11 @@ export default function AuthForm({ mode }: AuthFormProps) {
               className="h-14 w-auto"
             />
           </div>
-
-          <h1 className="mb-2 text-center font-heading text-4xl font-bold tracking-tight text-foreground text-balance md:text-5xl">
+          <h1 className="mb-2 text-center font-heading text-4xl font-bold tracking-tight text-white text-balance md:text-5xl">
             Verify Your Email
           </h1>
-          <p className="mb-10 text-center text-base text-muted-foreground text-pretty">
-            We sent a 8-digit code to <strong>{email}</strong>
+          <p className="mb-10 text-center text-base text-white/75 text-pretty">
+            We sent an 8-digit code to <strong>{email}</strong>
           </p>
 
           <form onSubmit={onSubmit} className="flex w-full flex-col gap-4">
@@ -417,7 +424,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
             </button>
           </div>
 
-          <p className="mt-6 max-w-sm text-center text-xs leading-relaxed text-muted-foreground">
+          <p className="mt-6 max-w-sm text-center text-xs leading-relaxed text-white/60">
             {"By continuing, you agree to our "}
             <a href="#" className="underline underline-offset-2 transition-colors hover:text-foreground">
               Terms of Service
@@ -433,8 +440,8 @@ export default function AuthForm({ mode }: AuthFormProps) {
       ) : (
 
         /* ── Login / Signup Form ────────────────────────────────────────────── */
-        <div className="relative z-10 flex w-full max-w-md flex-col items-center px-6">
-          <div className="mb-10">
+        <div className="relative z-10 w-full max-w-md rounded-3xl border border-white/10 bg-black/45 px-6 py-8 shadow-2xl backdrop-blur-md">
+          <div className="mb-10 flex justify-center">
             <Image
               src="/images/qtlogo.png"
               alt="Quick Thoughts logo"
@@ -444,11 +451,10 @@ export default function AuthForm({ mode }: AuthFormProps) {
               className="h-14 w-auto"
             />
           </div>
-
-          <h1 className="mb-2 text-center font-heading text-4xl font-bold tracking-tight text-foreground text-balance md:text-5xl">
+          <h1 className="mb-2 text-center font-heading text-4xl font-bold tracking-tight text-white text-balance md:text-5xl">
             {isSignup ? "Get Started" : "Welcome Back"}
           </h1>
-          <p className="mb-10 text-center text-base text-muted-foreground text-pretty">
+          <p className="mb-10 text-center text-base text-white/75 text-pretty">
             {isSignup
               ? "Create an account to start capturing your thoughts"
               : "Sign in to access your voice memos and transcriptions"}
@@ -603,7 +609,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
             </Link>
           </p>
 
-          <p className="mt-6 max-w-sm text-center text-xs leading-relaxed text-muted-foreground">
+          <p className="mt-6 max-w-sm text-center text-xs leading-relaxed text-white/60">
             {"By continuing, you agree to our "}
             <a href="#" className="underline underline-offset-2 transition-colors hover:text-foreground">
               Terms of Service
