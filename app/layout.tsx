@@ -3,6 +3,7 @@ import { Inter, Space_Grotesk } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import { Toaster } from '@/components/ui/sonner'
 import { MemoProvider } from "@/app/context/MemoContext"
+import { SessionTimeoutProvider } from "@/components/sessiontimeoutcontext"
 import './globals.css'
 
 const inter = Inter({ 
@@ -49,9 +50,17 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${inter.variable} ${spaceGrotesk.variable}`}>
       <body className={`${inter.className} font-sans antialiased min-h-screen bg-background text-foreground`}>
-        {/* MemoProvider wraps everything to share data across all routes */}
+        {/*
+          Provider order matters:
+          - MemoProvider: manages memo state and Supabase data sync
+          - SessionTimeoutProvider: sits inside MemoProvider so it can read auth
+            state changes that MemoProvider also tracks, but does NOT depend on
+            memo data itself — it only needs the Supabase client for sign-out.
+        */}
         <MemoProvider>
-          {children}
+          <SessionTimeoutProvider>
+            {children}
+          </SessionTimeoutProvider>
         </MemoProvider>
         
         {/* Global UI Components */}

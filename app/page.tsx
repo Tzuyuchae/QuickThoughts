@@ -6,6 +6,7 @@
  *   - Rate limiting: max 10 Gemini calls per day (enforced server-side in DB, resets at midnight)
  *   - Post-recording folder selection + memo title naming with confirmation
  *   - Empty/silent memo prevention: guards in voice-only, AI, and confirm paths
+ *   - Session timeout integration: cancels active recording before sign-out
  *
  * Mobile fix for Voice-to-Text Only mode:
  *   continuous=true  → holds a persistent connection to Google's speech servers
@@ -20,7 +21,7 @@
 
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -42,6 +43,7 @@ import {
 } from "lucide-react"
 import { Navbar } from "@/components/ui/navbar"
 import { useMemos } from "@/app/context/MemoContext"
+import { useSessionTimeout } from "@/components/sessiontimeoutcontext"
 import { createClient } from "@/lib/supabase/browser"
 import { Progress } from "@/components/ui/progress"
 import { DotGridBackground } from "@/components/ui/dot-grid-background"
@@ -94,6 +96,7 @@ function isTranscriptMeaningful(text: string): boolean {
 // ---------------------------------------------------------------------------
 export default function HomePage() {
   const { memos, addMemo } = useMemos()
+  const { setRecordingActiveCallback, setCancelRecordingCallback } = useSessionTimeout()
 
   const [recording, setRecording] = useState(false)
   const [recordingTime, setRecordingTime] = useState(0)
@@ -127,10 +130,68 @@ export default function HomePage() {
   const transcriptRef = useRef("")
   const recordingStartTimeRef = useRef<number>(0)
 
+  // Expose recording state to the session timeout provider
+  const recordingRef = useRef(false)
+
   const micTestStreamRef = useRef<MediaStream | null>(null)
   const micTestAudioContextRef = useRef<AudioContext | null>(null)
   const micTestAnalyserRef = useRef<AnalyserNode | null>(null)
   const micTestAnimationFrameRef = useRef<number | null>(null)
+
+  // ---------------------------------------------------------------------------
+  // cancelRecording — stable reference used by session timeout
+  // ---------------------------------------------------------------------------
+  const cancelRecording = useCallback(() => {
+    stopMicrophoneTest()
+    isCancellingRef.current = true
+    setError(null)
+    setMicTestStatus(null)
+    setPendingTranscript(null)
+    setMemoTitle("")
+    setConfirmed(false)
+    setRecordingTime(0)
+
+    if (voiceOnlyMode) {
+      transcriptRef.current = ""
+      isRecordingActiveRef.current = false
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop() } catch {}
+      }
+    } else {
+      audioChunksRef.current = []
+      if (mediaRecorderRef.current?.state === "recording") {
+        mediaRecorderRef.current.stop()
+      } else {
+        isCancellingRef.current = false
+        setRecording(false)
+        recordingRef.current = false
+      }
+    }
+
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
+    if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
+    setRecording(false)
+    recordingRef.current = false
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voiceOnlyMode])
+
+  // ---------------------------------------------------------------------------
+  // Register callbacks with session timeout provider
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    setRecordingActiveCallback(() => recordingRef.current)
+    setCancelRecordingCallback(cancelRecording)
+
+    return () => {
+      setRecordingActiveCallback(null)
+      setCancelRecordingCallback(null)
+    }
+  }, [setRecordingActiveCallback, setCancelRecordingCallback, cancelRecording])
+
+  // Keep recordingRef in sync with recording state
+  useEffect(() => {
+    recordingRef.current = recording
+  }, [recording])
 
   // ---------------------------------------------------------------------------
   // Fetch real rate limit count from the database
@@ -369,6 +430,7 @@ export default function HomePage() {
 
       setError(messages[event.error] ?? `Speech error: ${event.error}. Please try again.`)
       setRecording(false)
+      recordingRef.current = false
       setRecordingTime(0)
     }
 
@@ -380,6 +442,7 @@ export default function HomePage() {
         if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
         setPendingTranscript(null)
         setRecording(false)
+        recordingRef.current = false
         setRecordingTime(0)
         return
       }
@@ -401,12 +464,14 @@ export default function HomePage() {
             : "No speech detected. Please try again."
         )
         setRecording(false)
+        recordingRef.current = false
         setRecordingTime(0)
         return
       }
 
       setPendingTranscript(finalText)
       setRecording(false)
+      recordingRef.current = false
       setRecordingTime(0)
     }
 
@@ -461,6 +526,7 @@ export default function HomePage() {
     if (durationSeconds < MIN_RECORDING_SECONDS) {
       setError("Recording was too short. Please hold the button and speak, then tap Stop.")
       setRecording(false)
+      recordingRef.current = false
       setRecordingTime(0)
       return
     }
@@ -468,6 +534,7 @@ export default function HomePage() {
     if (audioBlob.size < MIN_AUDIO_BYTES) {
       setError("Recording was too short or silent. Please speak clearly and try again.")
       setRecording(false)
+      recordingRef.current = false
       setRecordingTime(0)
       return
     }
@@ -574,6 +641,7 @@ export default function HomePage() {
         isRecordingActiveRef.current = true
 
         setRecording(true)
+        recordingRef.current = true
         recordingTimerRef.current = setInterval(() => setRecordingTime((prev) => prev + 1), 1000)
         recordingTimeoutRef.current = setTimeout(() => stopRecording(), 120000)
 
@@ -604,6 +672,7 @@ export default function HomePage() {
           isCancellingRef.current = false
           audioChunksRef.current = []
           setRecording(false)
+          recordingRef.current = false
           setRecordingTime(0)
           return
         }
@@ -612,11 +681,13 @@ export default function HomePage() {
         const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" })
         await processAudioWithGemini(audioBlob, durationSeconds)
         setRecording(false)
+        recordingRef.current = false
         setRecordingTime(0)
       }
 
       mediaRecorder.start()
       setRecording(true)
+      recordingRef.current = true
       recordingTimerRef.current = setInterval(() => setRecordingTime((prev) => prev + 1), 1000)
       recordingTimeoutRef.current = setTimeout(() => {
         if (mediaRecorder.state === "recording") stopRecording()
@@ -624,6 +695,7 @@ export default function HomePage() {
     } catch (err: any) {
       setError(err?.message || "Microphone access denied.")
       setRecording(false)
+      recordingRef.current = false
     }
   }
 
@@ -641,37 +713,6 @@ export default function HomePage() {
 
     if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
     if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
-  }
-
-  const cancelRecording = () => {
-    stopMicrophoneTest()
-    isCancellingRef.current = true
-    setError(null)
-    setMicTestStatus(null)
-    setPendingTranscript(null)
-    setMemoTitle("")
-    setConfirmed(false)
-    setRecordingTime(0)
-
-    if (voiceOnlyMode) {
-      transcriptRef.current = ""
-      isRecordingActiveRef.current = false
-      if (recognitionRef.current) {
-        try { recognitionRef.current.stop() } catch {}
-      }
-    } else {
-      audioChunksRef.current = []
-      if (mediaRecorderRef.current?.state === "recording") {
-        mediaRecorderRef.current.stop()
-      } else {
-        isCancellingRef.current = false
-        setRecording(false)
-      }
-    }
-
-    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
-    if (recordingTimeoutRef.current) clearTimeout(recordingTimeoutRef.current)
-    setRecording(false)
   }
 
   const formatTime = (seconds: number): string => {
